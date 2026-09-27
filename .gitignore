@@ -1,0 +1,48 @@
+@"
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# IDE / editor
+.vscode/
+.idea/
+.spyproject/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+# UTKFace dataset
+UTKFace/
+data/*
+!data/.gitkeep
+
+# Trained TensorFlow / Keras models
+*.h5
+*.keras
+*.ckpt
+*.weights.h5
+
+# TensorFlow / training logs
+logs/
+tensorboard/
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+
+# Temporary files
+*.tmp
+*.log
+"@ | Set-Content .gitignore
