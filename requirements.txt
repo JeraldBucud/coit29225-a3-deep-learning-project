@@ -1,0 +1,9 @@
+tensorflow==2.21.0
+keras==3.15.1
+numpy==2.4.6
+pandas==3.0.6
+matplotlib==3.11.2
+scikit-learn==1.9.1
+pillow==12.3.0
+visualkeras==0.2.0
+pydot==4.0.1
