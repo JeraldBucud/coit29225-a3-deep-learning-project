@@ -16,6 +16,7 @@ The complete program will perform the following stages:
 - Exclude malformed or invalid dataset records.
 - Split the dataset into training and validation subsets.
 - Resize and normalise facial images.
+- Visually inspect preprocessed facial images.
 - Build a shared CNN feature-extraction network.
 - Create separate output heads for gender classification and age regression.
 - Train the CNN using the original dataset.
@@ -33,6 +34,7 @@ to be located in the user's Desktop/UTKFace directory.
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
@@ -45,6 +47,9 @@ from sklearn.model_selection import train_test_split
 # Path.home() makes the program portable between Windows user accounts
 # while still following the required Desktop/UTKFace directory structure.
 DATASET_PATH = Path.home() / "Desktop" / "UTKFace"
+
+# Directory used for generated figures and other program outputs.
+OUTPUT_DIR = Path("outputs")
 
 # All images are resized to a consistent shape before entering the CNN.
 IMAGE_SIZE = (128, 128)
@@ -150,15 +155,23 @@ def load_metadata(dataset_path):
     invalid_files = []
 
     # Sorting provides a consistent processing order between program runs.
-    image_files = sorted(dataset_path.glob("*.jpg"))
+    image_files = sorted(
+        dataset_path.glob("*.jpg")
+    )
 
     for image_path in image_files:
-        record = parse_filename(image_path)
+        record = parse_filename(
+            image_path
+        )
 
         if record is None:
-            invalid_files.append(image_path.name)
+            invalid_files.append(
+                image_path.name
+            )
         else:
-            records.append(record)
+            records.append(
+                record
+            )
 
     return records, invalid_files
 
@@ -183,27 +196,62 @@ def display_dataset_summary(records, invalid_files):
         Filenames that could not be parsed or validated.
     """
 
-    ages = [record["age"] for record in records]
-    genders = [record["gender"] for record in records]
-    ethnicities = [record["ethnicity"] for record in records]
+    ages = [
+        record["age"]
+        for record in records
+    ]
+
+    genders = [
+        record["gender"]
+        for record in records
+    ]
+
+    ethnicities = [
+        record["ethnicity"]
+        for record in records
+    ]
 
     print("\nUTKFace Dataset Summary")
     print("-----------------------")
-    print(f"Total image files: {len(records) + len(invalid_files)}")
-    print(f"Valid records: {len(records)}")
-    print(f"Invalid records: {len(invalid_files)}")
+    print(
+        f"Total image files: "
+        f"{len(records) + len(invalid_files)}"
+    )
+    print(
+        f"Valid records: "
+        f"{len(records)}"
+    )
+    print(
+        f"Invalid records: "
+        f"{len(invalid_files)}"
+    )
 
     # Age statistics provide an initial view of the regression target.
     print("\nAge statistics:")
-    print(f"Minimum age: {min(ages)}")
-    print(f"Maximum age: {max(ages)}")
-    print(f"Average age: {sum(ages) / len(ages):.2f}")
+    print(
+        f"Minimum age: "
+        f"{min(ages)}"
+    )
+    print(
+        f"Maximum age: "
+        f"{max(ages)}"
+    )
+    print(
+        f"Average age: "
+        f"{sum(ages) / len(ages):.2f}"
+    )
 
     # Gender counts help identify whether the classification target
     # contains a substantial class imbalance.
     print("\nGender distribution:")
-    print(f"Gender 0: {genders.count(0)}")
-    print(f"Gender 1: {genders.count(1)}")
+    print(
+        f"Gender 0: "
+        f"{genders.count(0)}"
+    )
+    print(
+        f"Gender 1: "
+        f"{genders.count(1)}"
+    )
 
     # Ethnicity is not an output target for this assessment, but retaining
     # its metadata is useful for validating the UTKFace filename structure.
@@ -293,7 +341,9 @@ def preprocess_image(image_path, age, gender):
     """
 
     # Read the JPEG file from disk only when TensorFlow requires it.
-    image = tf.io.read_file(image_path)
+    image = tf.io.read_file(
+        image_path
+    )
 
     # Decode the image using three colour channels (RGB).
     image = tf.io.decode_jpeg(
@@ -404,7 +454,138 @@ def create_tf_dataset(records, training=False):
 
 
 # ---------------------------------------------------------------------------
-# 7. Main Program
+# 7. Preprocessed Image Visualisation
+# ---------------------------------------------------------------------------
+
+def visualise_preprocessed_images(dataset, num_images=9):
+    """
+    Display and save a sample of preprocessed UTKFace images.
+
+    This visual check confirms that images remain visually meaningful after
+    JPEG decoding, resizing, RGB conversion, and pixel normalisation.
+
+    Parameters
+    ----------
+    dataset : tf.data.Dataset
+        TensorFlow dataset containing preprocessed images and labels.
+
+    num_images : int, optional
+        Number of images to display. The default is 9.
+    """
+
+    # Retrieve one batch from the dataset for visual inspection.
+    images, labels = next(
+        iter(dataset)
+    )
+
+    # Ensure the requested sample does not exceed the batch size.
+    num_images = min(
+        num_images,
+        int(images.shape[0]),
+    )
+
+    # Use three columns to provide a compact visual arrangement.
+    columns = 3
+
+    rows = (
+        num_images
+        + columns
+        - 1
+    ) // columns
+
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(
+            10,
+            3.5 * rows,
+        ),
+    )
+
+    # Flatten the subplot array so each position can be accessed using
+    # a single index.
+    axes = axes.flatten()
+
+    for index in range(num_images):
+        image = images[index].numpy()
+
+        age = int(
+            labels["age"][index].numpy()
+        )
+
+        gender = int(
+            labels["gender"][index].numpy()
+        )
+
+        axes[index].imshow(
+            image
+        )
+
+        axes[index].set_title(
+            f"Age: {age} | Gender: {gender}"
+        )
+
+        axes[index].axis(
+            "off"
+        )
+
+    # Hide unused subplot positions if the requested sample does not
+    # completely fill the final row.
+    for index in range(
+        num_images,
+        len(axes),
+    ):
+        axes[index].axis(
+            "off"
+        )
+
+    figure.suptitle(
+        "Preprocessed UTKFace Samples",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+    rect=(0, 0, 1, 0.95),
+    h_pad=1.2,
+    w_pad=0.8,
+    )
+
+    # Create the output directory only when generated files are required.
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / "utkface_preprocessed_samples.png"
+    )
+
+    # Save a high-resolution copy that can later be used as report evidence.
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    print("\nPreprocessed Image Visualisation")
+    print("--------------------------------")
+    print(
+        f"Saved figure: "
+        f"{output_path}"
+    )
+
+    # Display the figure interactively during development.
+    plt.show()
+
+    # Release the Matplotlib figure after it has been displayed.
+    plt.close(
+        figure
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -514,6 +695,13 @@ def main():
     print(
         f"Maximum pixel value: "
         f"{tf.reduce_max(validation_images).numpy():.4f}"
+    )
+
+    # Display a stable validation sample after preprocessing. Validation
+    # data is used because it is not shuffled between program runs.
+    visualise_preprocessed_images(
+        validation_dataset,
+        num_images=9,
     )
 
 
