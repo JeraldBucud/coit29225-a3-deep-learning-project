@@ -32,6 +32,7 @@ to be located in the user's Desktop/UTKFace directory.
 """
 
 from pathlib import Path
+
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
@@ -44,9 +45,17 @@ from sklearn.model_selection import train_test_split
 # Path.home() makes the program portable between Windows user accounts
 # while still following the required Desktop/UTKFace directory structure.
 DATASET_PATH = Path.home() / "Desktop" / "UTKFace"
+
+# All images are resized to a consistent shape before entering the CNN.
 IMAGE_SIZE = (128, 128)
+
+# Number of images processed together during training and validation.
 BATCH_SIZE = 32
+
+# Reserve 20% of the validated dataset for model validation.
 VALIDATION_SPLIT = 0.20
+
+# A fixed random seed keeps dataset splitting and shuffling reproducible.
 RANDOM_SEED = 42
 
 
@@ -199,8 +208,12 @@ def display_dataset_summary(records, invalid_files):
     # Ethnicity is not an output target for this assessment, but retaining
     # its metadata is useful for validating the UTKFace filename structure.
     print("\nEthnicity distribution:")
+
     for ethnicity in range(5):
-        print(f"Ethnicity {ethnicity}: {ethnicities.count(ethnicity)}")
+        print(
+            f"Ethnicity {ethnicity}: "
+            f"{ethnicities.count(ethnicity)}"
+        )
 
     # Report malformed records explicitly so preprocessing decisions
     # remain transparent and reproducible.
@@ -219,9 +232,9 @@ def split_records(records):
     """
     Split validated UTKFace records into training and validation subsets.
 
-    A fixed random seed is used so that the same split is produced between
-    program runs. This makes later comparisons between CNN configurations
-    and data augmentation experiments more consistent.
+    Gender labels are used for stratification so that both subsets retain
+    approximately the same gender distribution. A fixed random seed keeps
+    the split reproducible between experiments.
 
     Parameters
     ----------
@@ -234,37 +247,274 @@ def split_records(records):
         Training records and validation records.
     """
 
+    gender_labels = [
+        record["gender"]
+        for record in records
+    ]
+
     train_records, validation_records = train_test_split(
         records,
         test_size=VALIDATION_SPLIT,
         random_state=RANDOM_SEED,
         shuffle=True,
+        stratify=gender_labels,
     )
 
     return train_records, validation_records
 
 
 # ---------------------------------------------------------------------------
-# 6. Main Program
+# 6. Image Preprocessing
+# ---------------------------------------------------------------------------
+
+def preprocess_image(image_path, age, gender):
+    """
+    Load and preprocess one UTKFace image for CNN input.
+
+    Each image is decoded as RGB, resized to the configured image size,
+    and normalised from the original 0-255 pixel range to 0-1.
+
+    Parameters
+    ----------
+    image_path : tf.Tensor
+        Path to the image file.
+
+    age : tf.Tensor
+        Ground-truth age value.
+
+    gender : tf.Tensor
+        Ground-truth gender label.
+
+    Returns
+    -------
+    tuple
+        Preprocessed image tensor and a dictionary containing the
+        corresponding age and gender targets.
+    """
+
+    # Read the JPEG file from disk only when TensorFlow requires it.
+    image = tf.io.read_file(image_path)
+
+    # Decode the image using three colour channels (RGB).
+    image = tf.io.decode_jpeg(
+        image,
+        channels=3,
+    )
+
+    # Resize every image to a consistent shape required by the CNN.
+    image = tf.image.resize(
+        image,
+        IMAGE_SIZE,
+    )
+
+    # Convert pixel values from 0-255 to floating-point values from 0-1.
+    image = tf.cast(
+        image,
+        tf.float32,
+    ) / 255.0
+
+    # Store both prediction targets using names that will later match
+    # the two output heads of the multi-output CNN.
+    labels = {
+        "gender": tf.cast(
+            gender,
+            tf.float32,
+        ),
+        "age": tf.cast(
+            age,
+            tf.float32,
+        ),
+    }
+
+    return image, labels
+
+
+def create_tf_dataset(records, training=False):
+    """
+    Create a TensorFlow data pipeline from validated UTKFace records.
+
+    Images are loaded lazily from disk rather than storing the complete
+    image dataset in memory. Training data is shuffled while validation
+    data remains in a stable order.
+
+    Parameters
+    ----------
+    records : list
+        Valid UTKFace metadata records.
+
+    training : bool, optional
+        Whether the dataset is being prepared for training.
+
+    Returns
+    -------
+    tf.data.Dataset
+        Batched and prefetched TensorFlow dataset.
+    """
+
+    image_paths = [
+        str(record["image_path"])
+        for record in records
+    ]
+
+    ages = [
+        record["age"]
+        for record in records
+    ]
+
+    genders = [
+        record["gender"]
+        for record in records
+    ]
+
+    # Construct a TensorFlow dataset from paths and target labels.
+    dataset = tf.data.Dataset.from_tensor_slices(
+        (
+            image_paths,
+            ages,
+            genders,
+        )
+    )
+
+    # Shuffle only the training dataset. A fixed seed keeps experiments
+    # reproducible while reshuffling the order between training epochs.
+    if training:
+        dataset = dataset.shuffle(
+            buffer_size=len(records),
+            seed=RANDOM_SEED,
+            reshuffle_each_iteration=True,
+        )
+
+    # Decode, resize, and normalise images in parallel.
+    dataset = dataset.map(
+        preprocess_image,
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
+    # Group individual images into training batches.
+    dataset = dataset.batch(
+        BATCH_SIZE
+    )
+
+    # Prepare future batches while the current batch is being processed.
+    dataset = dataset.prefetch(
+        tf.data.AUTOTUNE
+    )
+
+    return dataset
+
+
+# ---------------------------------------------------------------------------
+# 7. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
     """Run the current UTKFace preprocessing and exploration stages."""
 
+    # Confirm that the external UTKFace dataset is available.
     if not DATASET_PATH.exists():
-        print(f"Dataset folder not found: {DATASET_PATH}")
+        print(
+            f"Dataset folder not found: "
+            f"{DATASET_PATH}"
+        )
         return
 
-    records, invalid_files = load_metadata(DATASET_PATH)
+    # Load and validate metadata encoded in the image filenames.
+    records, invalid_files = load_metadata(
+        DATASET_PATH
+    )
 
-    display_dataset_summary(records, invalid_files)
+    # Display descriptive information about the validated dataset.
+    display_dataset_summary(
+        records,
+        invalid_files,
+    )
 
-    train_records, validation_records = split_records(records)
+    # Split the valid records into reproducible training and
+    # validation subsets.
+    train_records, validation_records = split_records(
+        records
+    )
 
     print("\nDataset Split")
     print("-------------")
-    print(f"Training records: {len(train_records)}")
-    print(f"Validation records: {len(validation_records)}")
+    print(
+        f"Training records: "
+        f"{len(train_records)}"
+    )
+    print(
+        f"Validation records: "
+        f"{len(validation_records)}"
+    )
+
+    # Build TensorFlow input pipelines for both subsets.
+    train_dataset = create_tf_dataset(
+        train_records,
+        training=True,
+    )
+
+    validation_dataset = create_tf_dataset(
+        validation_records,
+        training=False,
+    )
+
+    print("\nTensorFlow Dataset Test")
+    print("-----------------------")
+
+    # Inspect one training batch to confirm image preprocessing,
+    # target preparation, batching, and normalisation.
+    train_images, train_labels = next(
+        iter(train_dataset)
+    )
+
+    print("\nTraining batch:")
+    print(
+        f"Image batch shape: "
+        f"{train_images.shape}"
+    )
+    print(
+        f"Gender batch shape: "
+        f"{train_labels['gender'].shape}"
+    )
+    print(
+        f"Age batch shape: "
+        f"{train_labels['age'].shape}"
+    )
+    print(
+        f"Minimum pixel value: "
+        f"{tf.reduce_min(train_images).numpy():.4f}"
+    )
+    print(
+        f"Maximum pixel value: "
+        f"{tf.reduce_max(train_images).numpy():.4f}"
+    )
+
+    # Inspect one validation batch to verify that the validation
+    # pipeline produces the same input and target structure.
+    validation_images, validation_labels = next(
+        iter(validation_dataset)
+    )
+
+    print("\nValidation batch:")
+    print(
+        f"Image batch shape: "
+        f"{validation_images.shape}"
+    )
+    print(
+        f"Gender batch shape: "
+        f"{validation_labels['gender'].shape}"
+    )
+    print(
+        f"Age batch shape: "
+        f"{validation_labels['age'].shape}"
+    )
+    print(
+        f"Minimum pixel value: "
+        f"{tf.reduce_min(validation_images).numpy():.4f}"
+    )
+    print(
+        f"Maximum pixel value: "
+        f"{tf.reduce_max(validation_images).numpy():.4f}"
+    )
 
 
 if __name__ == "__main__":
