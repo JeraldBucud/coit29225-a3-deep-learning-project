@@ -32,6 +32,8 @@ to be located in the user's Desktop/UTKFace directory.
 """
 
 from pathlib import Path
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +44,10 @@ from pathlib import Path
 # Path.home() makes the program portable between Windows user accounts
 # while still following the required Desktop/UTKFace directory structure.
 DATASET_PATH = Path.home() / "Desktop" / "UTKFace"
+IMAGE_SIZE = (128, 128)
+BATCH_SIZE = 32
+VALIDATION_SPLIT = 0.20
+RANDOM_SEED = 42
 
 
 # ---------------------------------------------------------------------------
@@ -206,13 +212,45 @@ def display_dataset_summary(records, invalid_files):
 
 
 # ---------------------------------------------------------------------------
-# 5. Main Program
+# 5. Dataset Splitting
+# ---------------------------------------------------------------------------
+
+def split_records(records):
+    """
+    Split validated UTKFace records into training and validation subsets.
+
+    A fixed random seed is used so that the same split is produced between
+    program runs. This makes later comparisons between CNN configurations
+    and data augmentation experiments more consistent.
+
+    Parameters
+    ----------
+    records : list
+        Valid UTKFace metadata records.
+
+    Returns
+    -------
+    tuple
+        Training records and validation records.
+    """
+
+    train_records, validation_records = train_test_split(
+        records,
+        test_size=VALIDATION_SPLIT,
+        random_state=RANDOM_SEED,
+        shuffle=True,
+    )
+
+    return train_records, validation_records
+
+
+# ---------------------------------------------------------------------------
+# 6. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
-    """Run the current UTKFace data exploration and validation stage."""
+    """Run the current UTKFace preprocessing and exploration stages."""
 
-    # Stop cleanly if the external dataset has not been installed.
     if not DATASET_PATH.exists():
         print(f"Dataset folder not found: {DATASET_PATH}")
         return
@@ -220,6 +258,13 @@ def main():
     records, invalid_files = load_metadata(DATASET_PATH)
 
     display_dataset_summary(records, invalid_files)
+
+    train_records, validation_records = split_records(records)
+
+    print("\nDataset Split")
+    print("-------------")
+    print(f"Training records: {len(train_records)}")
+    print(f"Validation records: {len(validation_records)}")
 
 
 if __name__ == "__main__":
