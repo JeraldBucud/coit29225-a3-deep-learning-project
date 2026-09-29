@@ -68,6 +68,16 @@ AUGMENTATION_ROTATION = 0.05
 AUGMENTATION_ZOOM = 0.10
 AUGMENTATION_CONTRAST = 0.10
 
+# Initial optimisation settings for the baseline CNN experiment.
+LEARNING_RATE = 0.001
+DROPOUT_RATE = 0.30
+DENSE_UNITS = 128
+
+# Small development-only training run used to verify that the complete
+# model and data pipeline work before long experiments are started.
+SMOKE_TEST_TRAIN_BATCHES = 5
+SMOKE_TEST_VALIDATION_BATCHES = 2
+
 
 # ---------------------------------------------------------------------------
 # 2. UTKFace Metadata Parsing
@@ -751,8 +761,271 @@ def visualise_augmented_images(dataset, augmentation, num_images=9):
     )
 
 
+
 # ---------------------------------------------------------------------------
-# 9. Main Program
+# 9. CNN Architecture
+# ---------------------------------------------------------------------------
+
+def build_cnn_model(
+    use_augmentation=False,
+    filters=(32, 64, 128),
+    dense_units=128,
+    dropout_rate=0.30,
+):
+    """
+    Build the multi-output CNN for gender classification and age regression.
+
+    The model uses a shared convolutional feature-extraction backbone.
+    After the Flatten layer, the network separates into two task-specific
+    branches:
+
+    - Gender head: binary classification
+    - Age head: regression
+
+    Parameters
+    ----------
+    use_augmentation : bool, optional
+        Whether to include the data augmentation pipeline at the beginning
+        of the model. The default is False.
+
+    filters : tuple, optional
+        Number of convolutional filters used in each convolution block.
+        The default configuration is (32, 64, 128).
+
+    dense_units : int, optional
+        Number of neurons in each task-specific fully connected layer.
+        The default is 128.
+
+    dropout_rate : float, optional
+        Fraction of neurons randomly disabled during training to help
+        reduce overfitting. The default is 0.30.
+
+    Returns
+    -------
+    tf.keras.Model
+        Multi-output CNN with gender and age prediction heads.
+    """
+
+    inputs = tf.keras.Input(
+        shape=(
+            IMAGE_SIZE[0],
+            IMAGE_SIZE[1],
+            3,
+        ),
+        name="image",
+    )
+
+    x = inputs
+
+    # Data augmentation is included only for the augmented experiment.
+    # Keras automatically disables these random transformations during
+    # validation and prediction.
+    if use_augmentation:
+        augmentation = create_data_augmentation()
+        x = augmentation(x)
+
+    # Shared convolutional feature-extraction backbone.
+    for block_number, number_of_filters in enumerate(
+        filters,
+        start=1,
+    ):
+        x = tf.keras.layers.Conv2D(
+            filters=number_of_filters,
+            kernel_size=(3, 3),
+            activation="relu",
+            padding="same",
+            name=f"conv_{block_number}",
+        )(x)
+
+        x = tf.keras.layers.MaxPooling2D(
+            pool_size=(2, 2),
+            name=f"pool_{block_number}",
+        )(x)
+
+    # Convert the final convolutional feature maps into a one-dimensional
+    # feature vector before splitting into the two prediction heads.
+    shared_features = tf.keras.layers.Flatten(
+        name="flatten",
+    )(x)
+
+    # ------------------------------------------------------------------
+    # Gender classification head
+    # ------------------------------------------------------------------
+
+    gender_branch = tf.keras.layers.Dense(
+        dense_units,
+        activation="relu",
+        name="gender_dense",
+    )(shared_features)
+
+    gender_branch = tf.keras.layers.Dropout(
+        dropout_rate,
+        name="gender_dropout",
+    )(gender_branch)
+
+    # Sigmoid produces a probability suitable for binary classification.
+    gender_output = tf.keras.layers.Dense(
+        1,
+        activation="sigmoid",
+        name="gender",
+    )(gender_branch)
+
+    # ------------------------------------------------------------------
+    # Age regression head
+    # ------------------------------------------------------------------
+
+    age_branch = tf.keras.layers.Dense(
+        dense_units,
+        activation="relu",
+        name="age_dense",
+    )(shared_features)
+
+    age_branch = tf.keras.layers.Dropout(
+        dropout_rate,
+        name="age_dropout",
+    )(age_branch)
+
+    # A linear output allows the model to predict a continuous age value.
+    age_output = tf.keras.layers.Dense(
+        1,
+        activation="linear",
+        name="age",
+    )(age_branch)
+
+    model = tf.keras.Model(
+        inputs=inputs,
+        outputs={
+            "gender": gender_output,
+            "age": age_output,
+        },
+        name=(
+            "utkface_cnn_augmented"
+            if use_augmentation
+            else "utkface_cnn"
+        ),
+    )
+
+    return model
+
+
+
+# ---------------------------------------------------------------------------
+# 10. Model Compilation
+# ---------------------------------------------------------------------------
+
+def compile_cnn_model(model, learning_rate=LEARNING_RATE):
+    """
+    Compile the multi-output CNN with task-specific losses and metrics.
+
+    Gender prediction is treated as binary classification and therefore
+    uses binary cross-entropy loss with classification accuracy.
+
+    Age prediction is treated as regression and therefore uses mean
+    squared error as the optimisation loss and mean absolute error as
+    an interpretable evaluation metric.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        CNN containing the gender classification and age regression heads.
+
+    learning_rate : float, optional
+        Learning rate used by the Adam optimiser.
+
+    Returns
+    -------
+    tf.keras.Model
+        Compiled CNN ready for training.
+    """
+
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=learning_rate
+    )
+
+    model.compile(
+        optimizer=optimizer,
+        loss={
+            "gender": "binary_crossentropy",
+            "age": "mse",
+        },
+        metrics={
+            "gender": [
+                tf.keras.metrics.BinaryAccuracy(
+                    name="accuracy"
+                )
+            ],
+            "age": [
+                tf.keras.metrics.MeanAbsoluteError(
+                    name="mae"
+                )
+            ],
+        },
+    )
+
+    return model
+
+
+# ---------------------------------------------------------------------------
+# 11. Training Smoke Test
+# ---------------------------------------------------------------------------
+
+def run_training_smoke_test(
+    model,
+    train_dataset,
+    validation_dataset,
+):
+    """
+    Run a short training test to verify the complete CNN pipeline.
+
+    Only a few batches are used so that model compilation, label mapping,
+    forward propagation, backpropagation, losses, and metrics can be checked
+    before longer experimental training runs are started.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        Compiled multi-output CNN.
+
+    train_dataset : tf.data.Dataset
+        Preprocessed training dataset.
+
+    validation_dataset : tf.data.Dataset
+        Preprocessed validation dataset.
+
+    Returns
+    -------
+    tf.keras.callbacks.History
+        Keras training history produced by the smoke test.
+    """
+
+    print("\nCNN Training Smoke Test")
+    print("-----------------------")
+    print(
+        f"Training batches: "
+        f"{SMOKE_TEST_TRAIN_BATCHES}"
+    )
+    print(
+        f"Validation batches: "
+        f"{SMOKE_TEST_VALIDATION_BATCHES}"
+    )
+
+    history = model.fit(
+        train_dataset.take(
+            SMOKE_TEST_TRAIN_BATCHES
+        ),
+        validation_data=validation_dataset.take(
+            SMOKE_TEST_VALIDATION_BATCHES
+        ),
+        epochs=1,
+        shuffle=False,
+        verbose=1,
+    )
+
+    return history
+
+
+# ---------------------------------------------------------------------------
+# 12. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -881,6 +1154,31 @@ def main():
         num_images=9,
     )
 
+    # Build the baseline CNN without data augmentation.
+    model = build_cnn_model(
+        use_augmentation=False,
+        filters=(32, 64, 128),
+        dense_units=DENSE_UNITS,
+        dropout_rate=DROPOUT_RATE,
+    )
+
+    # Configure task-specific losses, metrics, and optimisation.
+    model = compile_cnn_model(
+        model,
+        learning_rate=LEARNING_RATE,
+    )
+
+    print("\nCNN Architecture")
+    print("----------------")
+
+    model.summary()
+
+    # Run a short development test before starting full CNN experiments.
+    run_training_smoke_test(
+        model,
+        train_dataset,
+        validation_dataset,
+    )
 
 if __name__ == "__main__":
     main()
