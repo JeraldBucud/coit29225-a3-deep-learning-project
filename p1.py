@@ -36,6 +36,7 @@ to be located in the user's Desktop/UTKFace directory.
 """
 
 from pathlib import Path
+from random import Random
 from time import perf_counter
 
 import matplotlib.pyplot as plt
@@ -2006,7 +2007,297 @@ def generate_cnn_architecture_visualisation():
 
 
 # ---------------------------------------------------------------------------
-# 18. Main Program
+# 18. CNN Sample Predictions
+# ---------------------------------------------------------------------------
+
+def generate_cnn_sample_predictions(
+    validation_records,
+    num_samples=10,
+):
+    """
+    Generate age and gender predictions for validation images.
+
+    A reproducible random sample is selected from the validation subset.
+    The saved original-data CNN is loaded so predictions can be generated
+    without retraining the network.
+
+    For each sample, the figure shows:
+
+    - Actual age
+    - Predicted age
+    - Actual gender
+    - Predicted gender
+
+    A CSV file containing the numerical prediction results is also saved.
+
+    Parameters
+    ----------
+    validation_records : list
+        Metadata records assigned to the validation subset.
+
+    num_samples : int, optional
+        Number of validation images to predict. The default is 10.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Prediction results, or None when the saved model is unavailable.
+    """
+
+    model_path = (
+        OUTPUT_DIR
+        / "cnn_original.keras"
+    )
+
+    if not model_path.exists():
+        print("\nCNN Sample Predictions")
+        print("----------------------")
+        print(
+            f"Saved model not found: "
+            f"{model_path}"
+        )
+
+        return None
+
+    num_samples = min(
+        num_samples,
+        len(validation_records),
+    )
+
+    # Select a reproducible random validation sample.
+    random_generator = Random(
+        RANDOM_SEED
+    )
+
+    sample_records = random_generator.sample(
+        validation_records,
+        num_samples,
+    )
+
+    # Create a dataset without shuffling so image order remains aligned
+    # with the selected metadata records.
+    sample_dataset = create_tf_dataset(
+        sample_records,
+        training=False,
+        batch_size=num_samples,
+    )
+
+    images, labels = next(
+        iter(sample_dataset)
+    )
+
+    # Load the trained original-data model without restoring its optimiser.
+    model = tf.keras.models.load_model(
+        model_path,
+        compile=False,
+    )
+
+    # Perform inference only. Augmentation and dropout are disabled.
+    predictions = model(
+        images,
+        training=False,
+    )
+
+    predicted_ages = (
+        predictions["age"]
+        .numpy()
+        .reshape(-1)
+    )
+
+    gender_probabilities = (
+        predictions["gender"]
+        .numpy()
+        .reshape(-1)
+    )
+
+    predicted_genders = (
+        gender_probabilities >= 0.5
+    ).astype(int)
+
+    actual_ages = (
+        labels["age"]
+        .numpy()
+        .astype(int)
+    )
+
+    actual_genders = (
+        labels["gender"]
+        .numpy()
+        .astype(int)
+    )
+
+    prediction_rows = []
+
+    for index in range(num_samples):
+        prediction_rows.append(
+            {
+                "filename": (
+                    sample_records[index][
+                        "image_path"
+                    ].name
+                ),
+                "actual_age": (
+                    actual_ages[index]
+                ),
+                "predicted_age": round(
+                    float(
+                        predicted_ages[index]
+                    ),
+                    2,
+                ),
+                "absolute_age_error": round(
+                    abs(
+                        float(
+                            predicted_ages[index]
+                        )
+                        - actual_ages[index]
+                    ),
+                    2,
+                ),
+                "actual_gender": (
+                    actual_genders[index]
+                ),
+                "predicted_gender": (
+                    predicted_genders[index]
+                ),
+                "gender_probability": round(
+                    float(
+                        gender_probabilities[index]
+                    ),
+                    4,
+                ),
+            }
+        )
+
+    results_table = pd.DataFrame(
+        prediction_rows
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    csv_path = (
+        OUTPUT_DIR
+        / "cnn_sample_predictions.csv"
+    )
+
+    results_table.to_csv(
+        csv_path,
+        index=False,
+    )
+
+    # ---------------------------------------------------------------
+    # Prediction visualisation
+    # ---------------------------------------------------------------
+
+    columns = 5
+
+    rows = (
+        num_samples
+        + columns
+        - 1
+    ) // columns
+
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(15, 7),
+    )
+
+    axes = axes.flatten()
+
+    for index in range(num_samples):
+        axes[index].imshow(
+            images[index].numpy()
+        )
+
+        title = (
+            f"Age: {actual_ages[index]} "
+            f"→ {predicted_ages[index]:.1f}\n"
+            f"Gender: {actual_genders[index]} "
+            f"→ {predicted_genders[index]}"
+        )
+
+        axes[index].set_title(
+            title,
+            fontsize=10,
+        )
+
+        axes[index].axis(
+            "off"
+        )
+
+    for index in range(
+        num_samples,
+        len(axes),
+    ):
+        axes[index].axis(
+            "off"
+        )
+
+    figure.suptitle(
+        "CNN Age and Gender Predictions",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(0, 0, 1, 0.95),
+        h_pad=1.5,
+        w_pad=1.0,
+    )
+
+    figure_path = (
+        OUTPUT_DIR
+        / "cnn_sample_predictions.png"
+    )
+
+    figure.savefig(
+        figure_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    print("\nCNN Sample Predictions")
+    print("----------------------")
+
+    print(
+        results_table[
+            [
+                "actual_age",
+                "predicted_age",
+                "absolute_age_error",
+                "actual_gender",
+                "predicted_gender",
+                "gender_probability",
+            ]
+        ].to_string(
+            index=False
+        )
+    )
+
+    print(
+        f"\nPrediction figure saved to: "
+        f"{figure_path}"
+    )
+
+    print(
+        f"Prediction data saved to: "
+        f"{csv_path}"
+    )
+
+    plt.show()
+
+    plt.close(
+        figure
+    )
+
+    return results_table
+
+
+# ---------------------------------------------------------------------------
+# 19. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -2218,6 +2509,17 @@ def main():
     
     # Generate the CNN architecture diagram from the saved final model.
     generate_cnn_architecture_visualisation()
+
+
+    # Generate ten reproducible prediction examples from the
+    # validation subset using the saved final original-data model.
+    generate_cnn_sample_predictions(
+        validation_records,
+        num_samples=10,
+    )
+
+    
+
 
     
 
