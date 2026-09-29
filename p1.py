@@ -41,7 +41,9 @@ from time import perf_counter
 import matplotlib.pyplot as plt
 import pandas as pd
 import tensorflow as tf
+import visualkeras
 from sklearn.model_selection import train_test_split
+
 
 
 # ---------------------------------------------------------------------------
@@ -1904,9 +1906,107 @@ def run_final_cnn_comparison(
 
     return results_table
 
+# ---------------------------------------------------------------------------
+# 17. CNN Architecture Visualisation
+# ---------------------------------------------------------------------------
+
+def generate_cnn_architecture_visualisation():
+    """
+    Generate and save a visual representation of the trained CNN.
+
+    The graph-based Visualkeras renderer is used because the CNN contains
+    a shared convolutional backbone followed by separate age-regression
+    and gender-classification branches.
+
+    The saved original-data model is used so architecture generation does
+    not require the network to be retrained.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Path to the generated architecture image, or None if the saved
+        model is unavailable.
+    """
+
+    model_path = (
+        OUTPUT_DIR
+        / "cnn_original.keras"
+    )
+
+    if not model_path.exists():
+        print("\nCNN Architecture Visualisation")
+        print("------------------------------")
+        print(
+            f"Saved model not found: "
+            f"{model_path}"
+        )
+
+        return None
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / "cnn_architecture_graph.png"
+    )
+
+    # Load the trained model without restoring optimisation state because
+    # only its network structure is required for visualisation.
+    model = tf.keras.models.load_model(
+        model_path,
+        compile=False,
+    )
+
+    # Graph view preserves the branching structure of the multi-output CNN.
+    architecture_image = visualkeras.graph_view(
+        model,
+        to_file=str(output_path),
+    )
+
+    print("\nCNN Architecture Visualisation")
+    print("------------------------------")
+    print(
+        f"Loaded model: "
+        f"{model_path}"
+    )
+    print(
+        f"Architecture saved to: "
+        f"{output_path}"
+    )
+
+    # Display the generated architecture at a manageable window size.
+    figure = plt.figure(
+        figsize=(10, 8)
+    )
+
+    plt.imshow(
+        architecture_image
+    )
+
+    plt.title(
+        "UTKFace Multi-Output CNN Architecture"
+    )
+
+    plt.axis(
+        "off"
+    )
+
+    plt.tight_layout()
+
+    plt.show()
+
+    plt.close(
+        figure
+    )
+
+    return output_path
+
 
 # ---------------------------------------------------------------------------
-# 17. Main Program
+# 18. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -2108,15 +2208,18 @@ def main():
     #     CNN_CONFIGURATIONS,
     # )
 
-    # ------------------------------------------------------------------
-    # Final original-vs-augmentation comparison
-    # ------------------------------------------------------------------
+    # Final original-vs-augmentation training has already been completed.
+    # Uncomment only if the final models need to be retrained.
+    #
+    # run_final_cnn_comparison(
+    #     train_records,
+    #     validation_records,
+    # )
+    
+    # Generate the CNN architecture diagram from the saved final model.
+    generate_cnn_architecture_visualisation()
 
-    run_final_cnn_comparison(
-        train_records,
-        validation_records,
-    )
-
+    
 
 if __name__ == "__main__":
     main()
