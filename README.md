@@ -106,4 +106,28 @@ Additional dependencies will be added as the project develops.
 
 ## Project Status
 
-Initial project setup.
+### Task 2.1 - CNN Age and Gender Estimation
+
+Implementation complete.
+
+Completed features include:
+
+- UTKFace metadata parsing and validation
+- Image resizing and normalisation
+- Reproducible training and validation split
+- Multi-output CNN for age regression and gender classification
+- Architectural and algorithmic parameter experiments
+- Data augmentation
+- Original-data and augmented-data CNN training
+- Explicit training and validation evaluation
+- Age MAE, gender accuracy, and loss curves
+- CNN architecture visualisation
+- Ten sample age and gender predictions per run
+- Assessment-required menu:
+  - Run CNN
+  - Run CNN with data augmentation
+  - Quit
+
+### Task 2.2 - LSTM Stock Price Forecasting
+
+Not yet implemented.
