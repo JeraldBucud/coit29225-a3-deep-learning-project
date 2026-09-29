@@ -28,8 +28,11 @@ The program includes the following stages:
 - Train the selected CNN using the original dataset.
 - Train the same CNN using data augmentation.
 - Compare original and augmented CNN performance.
+- Explicitly evaluate trained models on both training and validation sets.
 - Generate age MAE, gender accuracy, age loss, and gender loss curves.
+- Generate ten sample age/gender predictions for each executed model run.
 - Save trained models and experiment histories for later evaluation.
+- Provide the assessment-required three-option command-line menu.
 
 The UTKFace dataset is stored outside the Git repository and is expected
 to be located in the user's Desktop/UTKFace directory.
@@ -88,6 +91,13 @@ EXPERIMENT_EPOCHS = 5
 
 # Number of epochs used for the final original-vs-augmentation comparison.
 FINAL_TRAINING_EPOCHS = 10
+
+# UTKFace gender encoding used throughout prediction output.
+# 0 = Male, 1 = Female.
+GENDER_LABELS = {
+    0: "Male",
+    1: "Female",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1084,9 +1094,409 @@ def display_cnn_configurations():
         f"{EXPERIMENT_EPOCHS}"
     )
 
+# ---------------------------------------------------------------------------
+# 13. CNN Evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_cnn_model(
+    model,
+    train_records,
+    validation_records,
+    batch_size,
+):
+    """
+    Explicitly evaluate a trained CNN on the training and validation sets.
+
+    Evaluation datasets are created without shuffling. For augmented models,
+    Keras augmentation layers are automatically disabled because evaluation
+    runs with ``training=False``.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        Trained and compiled multi-output CNN.
+
+    train_records : list
+        Metadata records assigned to the training subset.
+
+    validation_records : list
+        Metadata records assigned to the validation subset.
+
+    batch_size : int
+        Batch size used during evaluation.
+
+    Returns
+    -------
+    tuple
+        Training metric dictionary and validation metric dictionary.
+    """
+
+    training_evaluation_dataset = create_tf_dataset(
+        train_records,
+        training=False,
+        batch_size=batch_size,
+    )
+
+    validation_evaluation_dataset = create_tf_dataset(
+        validation_records,
+        training=False,
+        batch_size=batch_size,
+    )
+
+    training_metrics = model.evaluate(
+        training_evaluation_dataset,
+        verbose=0,
+        return_dict=True,
+    )
+
+    validation_metrics = model.evaluate(
+        validation_evaluation_dataset,
+        verbose=0,
+        return_dict=True,
+    )
+
+    print("\nCNN Evaluation")
+    print("==============")
+
+    print("\nTraining Set")
+    print("------------")
+    print(
+        f"Age MAE: "
+        f"{training_metrics['age_mae']:.4f} years"
+    )
+    print(
+        f"Gender accuracy: "
+        f"{training_metrics['gender_accuracy']:.4f} "
+        f"({training_metrics['gender_accuracy'] * 100:.2f}%)"
+    )
+    print(
+        f"Age loss: "
+        f"{training_metrics['age_loss']:.4f}"
+    )
+    print(
+        f"Gender loss: "
+        f"{training_metrics['gender_loss']:.4f}"
+    )
+
+    print("\nValidation Set")
+    print("--------------")
+    print(
+        f"Age MAE: "
+        f"{validation_metrics['age_mae']:.4f} years"
+    )
+    print(
+        f"Gender accuracy: "
+        f"{validation_metrics['gender_accuracy']:.4f} "
+        f"({validation_metrics['gender_accuracy'] * 100:.2f}%)"
+    )
+    print(
+        f"Age loss: "
+        f"{validation_metrics['age_loss']:.4f}"
+    )
+    print(
+        f"Gender loss: "
+        f"{validation_metrics['gender_loss']:.4f}"
+    )
+
+    return training_metrics, validation_metrics
+
 
 # ---------------------------------------------------------------------------
-# 13. CNN Experiment Runner
+# 14. CNN Sample Predictions
+# ---------------------------------------------------------------------------
+
+def generate_cnn_sample_predictions(
+    model,
+    validation_records,
+    output_prefix,
+    num_samples=10,
+    show_plot=True,
+):
+    """
+    Generate reproducible age and gender predictions for validation images.
+
+    The function accepts any trained CNN model. This allows every parameter
+    configuration and every final program run to produce the ten sample
+    predictions required by the assessment specification.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        Trained CNN used for inference.
+
+    validation_records : list
+        Metadata records assigned to the validation subset.
+
+    output_prefix : str
+        Prefix used for the generated PNG and CSV filenames.
+
+    num_samples : int, optional
+        Number of validation images to predict.
+
+    show_plot : bool, optional
+        Whether to display the prediction figure interactively.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Prediction results for the selected validation images.
+    """
+
+    num_samples = min(
+        num_samples,
+        len(validation_records),
+    )
+
+    random_generator = Random(
+        RANDOM_SEED
+    )
+
+    sample_records = random_generator.sample(
+        validation_records,
+        num_samples,
+    )
+
+    sample_dataset = create_tf_dataset(
+        sample_records,
+        training=False,
+        batch_size=num_samples,
+    )
+
+    images, labels = next(
+        iter(sample_dataset)
+    )
+
+    predictions = model(
+        images,
+        training=False,
+    )
+
+    predicted_ages = (
+        predictions["age"]
+        .numpy()
+        .reshape(-1)
+    )
+
+    gender_probabilities = (
+        predictions["gender"]
+        .numpy()
+        .reshape(-1)
+    )
+
+    predicted_genders = (
+        gender_probabilities >= 0.5
+    ).astype(int)
+
+    actual_ages = (
+        labels["age"]
+        .numpy()
+        .astype(int)
+    )
+
+    actual_genders = (
+        labels["gender"]
+        .numpy()
+        .astype(int)
+    )
+
+    prediction_rows = []
+
+    for index in range(num_samples):
+        actual_gender = int(
+            actual_genders[index]
+        )
+
+        predicted_gender = int(
+            predicted_genders[index]
+        )
+
+        prediction_rows.append(
+            {
+                "filename": (
+                    sample_records[index][
+                        "image_path"
+                    ].name
+                ),
+                "actual_age": int(
+                    actual_ages[index]
+                ),
+                "predicted_age": round(
+                    float(
+                        predicted_ages[index]
+                    ),
+                    2,
+                ),
+                "absolute_age_error": round(
+                    abs(
+                        float(
+                            predicted_ages[index]
+                        )
+                        - actual_ages[index]
+                    ),
+                    2,
+                ),
+                "actual_gender": actual_gender,
+                "actual_gender_label": (
+                    GENDER_LABELS[
+                        actual_gender
+                    ]
+                ),
+                "predicted_gender": (
+                    predicted_gender
+                ),
+                "predicted_gender_label": (
+                    GENDER_LABELS[
+                        predicted_gender
+                    ]
+                ),
+                "gender_probability": round(
+                    float(
+                        gender_probabilities[
+                            index
+                        ]
+                    ),
+                    4,
+                ),
+            }
+        )
+
+    results_table = pd.DataFrame(
+        prediction_rows
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    csv_path = (
+        OUTPUT_DIR
+        / f"{output_prefix}_sample_predictions.csv"
+    )
+
+    results_table.to_csv(
+        csv_path,
+        index=False,
+    )
+
+    columns = 5
+
+    rows = (
+        num_samples
+        + columns
+        - 1
+    ) // columns
+
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(15, 7),
+    )
+
+    # plt.subplots returns an ndarray for the normal ten-image case.
+    # Converting to a flat array keeps indexing straightforward.
+    axes = axes.flatten()
+
+    for index in range(num_samples):
+        actual_gender = int(
+            actual_genders[index]
+        )
+
+        predicted_gender = int(
+            predicted_genders[index]
+        )
+
+        axes[index].imshow(
+            images[index].numpy()
+        )
+
+        title = (
+            f"Age: {actual_ages[index]} "
+            f"→ {predicted_ages[index]:.1f}\n"
+            f"{GENDER_LABELS[actual_gender]} "
+            f"→ "
+            f"{GENDER_LABELS[predicted_gender]}"
+        )
+
+        axes[index].set_title(
+            title,
+            fontsize=10,
+        )
+
+        axes[index].axis(
+            "off"
+        )
+
+    for index in range(
+        num_samples,
+        len(axes),
+    ):
+        axes[index].axis(
+            "off"
+        )
+
+    figure.suptitle(
+        "CNN Age and Gender Predictions",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(0, 0, 1, 0.95),
+        h_pad=1.5,
+        w_pad=1.0,
+    )
+
+    figure_path = (
+        OUTPUT_DIR
+        / f"{output_prefix}_sample_predictions.png"
+    )
+
+    figure.savefig(
+        figure_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    print("\nCNN Sample Predictions")
+    print("----------------------")
+
+    print(
+        results_table[
+            [
+                "actual_age",
+                "predicted_age",
+                "absolute_age_error",
+                "actual_gender_label",
+                "predicted_gender_label",
+                "gender_probability",
+            ]
+        ].to_string(
+            index=False
+        )
+    )
+
+    print(
+        f"\nPrediction figure saved to: "
+        f"{figure_path}"
+    )
+
+    print(
+        f"Prediction data saved to: "
+        f"{csv_path}"
+    )
+
+    if show_plot:
+        plt.show()
+
+    plt.close(
+        figure
+    )
+
+    return results_table
+
+
+# ---------------------------------------------------------------------------
+# 15. CNN Experiment Runner
 # ---------------------------------------------------------------------------
 
 def run_cnn_experiments(
@@ -1096,6 +1506,10 @@ def run_cnn_experiments(
 ):
     """
     Train and evaluate multiple CNN parameter configurations.
+
+    Every configuration uses the same validated training/validation split.
+    After training, the model is explicitly evaluated and ten reproducible
+    sample predictions are generated, as required by the specification.
 
     Parameters
     ----------
@@ -1222,6 +1636,28 @@ def run_cnn_experiments(
             - start_time
         )
 
+        training_metrics, validation_metrics = evaluate_cnn_model(
+            model,
+            train_records,
+            validation_records,
+            configuration[
+                "batch_size"
+            ],
+        )
+
+        output_prefix = (
+            f"cnn_experiment_"
+            f"{configuration['name']}"
+        )
+
+        generate_cnn_sample_predictions(
+            model,
+            validation_records,
+            output_prefix=output_prefix,
+            num_samples=10,
+            show_plot=False,
+        )
+
         result = {
             "configuration": configuration["name"],
             "filters": str(
@@ -1291,6 +1727,30 @@ def run_cnn_experiments(
                 ][-1],
                 4,
             ),
+            "evaluated_train_age_mae": round(
+                training_metrics[
+                    "age_mae"
+                ],
+                4,
+            ),
+            "evaluated_train_gender_accuracy": round(
+                training_metrics[
+                    "gender_accuracy"
+                ],
+                4,
+            ),
+            "evaluated_validation_age_mae": round(
+                validation_metrics[
+                    "age_mae"
+                ],
+                4,
+            ),
+            "evaluated_validation_gender_accuracy": round(
+                validation_metrics[
+                    "gender_accuracy"
+                ],
+                4,
+            ),
         }
 
         results.append(
@@ -1354,7 +1814,419 @@ def run_cnn_experiments(
 
 
 # ---------------------------------------------------------------------------
-# 14. Final CNN Training
+# 16. Single-Run Training Curves
+# ---------------------------------------------------------------------------
+
+def generate_single_run_training_plots(
+    history,
+    scenario,
+    show_plot=True,
+):
+    """
+    Generate the four required training/validation curves for one CNN run.
+
+    Parameters
+    ----------
+    history : dict
+        Keras training-history dictionary.
+
+    scenario : str
+        Run identifier such as ``original`` or ``augmented``.
+
+    show_plot : bool, optional
+        Whether to display the combined curve figure.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the saved combined training-curve figure.
+    """
+
+    figure, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12, 9),
+    )
+
+    epochs = range(
+        1,
+        len(history["age_mae"]) + 1,
+    )
+
+    # Age MAE.
+    axes[0, 0].plot(
+        epochs,
+        history["age_mae"],
+        label="Training",
+    )
+
+    axes[0, 0].plot(
+        epochs,
+        history["val_age_mae"],
+        label="Validation",
+    )
+
+    axes[0, 0].set_title(
+        "Age Mean Absolute Error"
+    )
+
+    axes[0, 0].set_xlabel(
+        "Epoch"
+    )
+
+    axes[0, 0].set_ylabel(
+        "MAE (Years)"
+    )
+
+    axes[0, 0].legend()
+    axes[0, 0].grid(
+        alpha=0.3
+    )
+
+    # Gender accuracy.
+    axes[0, 1].plot(
+        epochs,
+        history["gender_accuracy"],
+        label="Training",
+    )
+
+    axes[0, 1].plot(
+        epochs,
+        history["val_gender_accuracy"],
+        label="Validation",
+    )
+
+    axes[0, 1].set_title(
+        "Gender Classification Accuracy"
+    )
+
+    axes[0, 1].set_xlabel(
+        "Epoch"
+    )
+
+    axes[0, 1].set_ylabel(
+        "Accuracy"
+    )
+
+    axes[0, 1].legend()
+    axes[0, 1].grid(
+        alpha=0.3
+    )
+
+    # Age loss.
+    axes[1, 0].plot(
+        epochs,
+        history["age_loss"],
+        label="Training",
+    )
+
+    axes[1, 0].plot(
+        epochs,
+        history["val_age_loss"],
+        label="Validation",
+    )
+
+    axes[1, 0].set_title(
+        "Age Regression Loss"
+    )
+
+    axes[1, 0].set_xlabel(
+        "Epoch"
+    )
+
+    axes[1, 0].set_ylabel(
+        "Mean Squared Error"
+    )
+
+    axes[1, 0].legend()
+    axes[1, 0].grid(
+        alpha=0.3
+    )
+
+    # Gender loss.
+    axes[1, 1].plot(
+        epochs,
+        history["gender_loss"],
+        label="Training",
+    )
+
+    axes[1, 1].plot(
+        epochs,
+        history["val_gender_loss"],
+        label="Validation",
+    )
+
+    axes[1, 1].set_title(
+        "Gender Classification Loss"
+    )
+
+    axes[1, 1].set_xlabel(
+        "Epoch"
+    )
+
+    axes[1, 1].set_ylabel(
+        "Binary Cross-Entropy"
+    )
+
+    axes[1, 1].legend()
+    axes[1, 1].grid(
+        alpha=0.3
+    )
+
+    figure.suptitle(
+        f"CNN Training Results - "
+        f"{scenario.capitalize()} Dataset",
+        fontsize=15,
+    )
+
+    figure.tight_layout(
+        rect=(0, 0, 1, 0.96)
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / f"cnn_{scenario}_training_curves.png"
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    print(
+        f"\nTraining curves saved to: "
+        f"{output_path}"
+    )
+
+    if show_plot:
+        plt.show()
+
+    plt.close(
+        figure
+    )
+
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# 17. Final Comparison Curves
+# ---------------------------------------------------------------------------
+
+def save_metric_comparison_plot(
+    histories,
+    metric,
+    validation_metric,
+    title,
+    y_label,
+    filename,
+):
+    """
+    Save a training/validation curve comparing original and augmented CNNs.
+    """
+
+    figure = plt.figure(
+        figsize=(8, 6)
+    )
+
+    for scenario, history in histories.items():
+        epochs = range(
+            1,
+            len(history[metric]) + 1,
+        )
+
+        label_name = scenario.capitalize()
+
+        plt.plot(
+            epochs,
+            history[metric],
+            label=f"{label_name} Training",
+        )
+
+        plt.plot(
+            epochs,
+            history[validation_metric],
+            linestyle="--",
+            label=f"{label_name} Validation",
+        )
+
+    plt.title(
+        title
+    )
+
+    plt.xlabel(
+        "Epoch"
+    )
+
+    plt.ylabel(
+        y_label
+    )
+
+    plt.legend()
+
+    plt.grid(
+        alpha=0.3
+    )
+
+    plt.tight_layout()
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / filename
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(
+        figure
+    )
+
+    print(
+        f"Saved figure: "
+        f"{output_path}"
+    )
+
+
+def generate_final_training_plots(histories):
+    """
+    Generate original-vs-augmented comparison curves for the final report.
+    """
+
+    print("\nGenerating Final CNN Comparison Curves")
+    print("--------------------------------------")
+
+    save_metric_comparison_plot(
+        histories,
+        metric="age_mae",
+        validation_metric="val_age_mae",
+        title="CNN Age Mean Absolute Error",
+        y_label="Mean Absolute Error (Years)",
+        filename="cnn_age_mae_comparison.png",
+    )
+
+    save_metric_comparison_plot(
+        histories,
+        metric="gender_accuracy",
+        validation_metric="val_gender_accuracy",
+        title="CNN Gender Classification Accuracy",
+        y_label="Accuracy",
+        filename="cnn_gender_accuracy_comparison.png",
+    )
+
+    save_metric_comparison_plot(
+        histories,
+        metric="age_loss",
+        validation_metric="val_age_loss",
+        title="CNN Age Regression Loss",
+        y_label="Mean Squared Error",
+        filename="cnn_age_loss_comparison.png",
+    )
+
+    save_metric_comparison_plot(
+        histories,
+        metric="gender_loss",
+        validation_metric="val_gender_loss",
+        title="CNN Gender Classification Loss",
+        y_label="Binary Cross-Entropy",
+        filename="cnn_gender_loss_comparison.png",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18. CNN Architecture Visualisation
+# ---------------------------------------------------------------------------
+
+def generate_cnn_architecture_visualisation(
+    model,
+    output_prefix,
+    show_plot=True,
+):
+    """
+    Generate and save a graph representation of a CNN architecture.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        CNN whose architecture should be visualised.
+
+    output_prefix : str
+        Prefix used for the output filename.
+
+    show_plot : bool, optional
+        Whether the architecture image should be displayed.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the generated architecture image.
+    """
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / f"{output_prefix}_architecture_graph.png"
+    )
+
+    architecture_image = visualkeras.graph_view(
+        model,
+        to_file=str(output_path),
+    )
+
+    print("\nCNN Architecture Visualisation")
+    print("------------------------------")
+    print(
+        f"Architecture saved to: "
+        f"{output_path}"
+    )
+
+    if show_plot:
+        figure = plt.figure(
+            figsize=(10, 8)
+        )
+
+        plt.imshow(
+            architecture_image
+        )
+
+        plt.title(
+            "UTKFace Multi-Output CNN Architecture"
+        )
+
+        plt.axis(
+            "off"
+        )
+
+        plt.tight_layout()
+
+        plt.show()
+
+        plt.close(
+            figure
+        )
+
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# 19. Final CNN Training
 # ---------------------------------------------------------------------------
 
 def train_final_cnn(
@@ -1364,30 +2236,16 @@ def train_final_cnn(
     use_augmentation=False,
 ):
     """
-    Train the selected CNN configuration for the final comparison.
+    Train, evaluate, and report the selected final CNN configuration.
 
-    The same architecture, optimiser settings, dataset split, and epoch
-    count are used in both scenarios. The controlled difference is whether
-    data augmentation is enabled.
-
-    Parameters
-    ----------
-    train_records : list
-        Training metadata records.
-
-    validation_records : list
-        Validation metadata records.
-
-    configuration : dict
-        Selected CNN parameter configuration.
-
-    use_augmentation : bool, optional
-        Whether augmentation should be included during training.
+    The original-data and augmented runs use the same architecture,
+    optimiser settings, split, and epoch count. The controlled difference
+    is whether data augmentation is enabled.
 
     Returns
     -------
     tuple
-        Training history dictionary and summary result dictionary.
+        Training-history dictionary and summary-result dictionary.
     """
 
     scenario = (
@@ -1480,6 +2338,10 @@ def train_final_cnn(
         f"{model.count_params():,}"
     )
 
+    print("\nCNN Architecture")
+    print("----------------")
+    model.summary()
+
     start_time = perf_counter()
 
     history = model.fit(
@@ -1556,6 +2418,13 @@ def train_final_cnn(
         + 1
     )
 
+    training_metrics, validation_metrics = evaluate_cnn_model(
+        model,
+        train_records,
+        validation_records,
+        configuration["batch_size"],
+    )
+
     result = {
         "scenario": scenario,
         "configuration": configuration["name"],
@@ -1629,6 +2498,30 @@ def train_final_cnn(
             ][-1],
             4,
         ),
+        "evaluated_train_age_mae": round(
+            training_metrics[
+                "age_mae"
+            ],
+            4,
+        ),
+        "evaluated_train_gender_accuracy": round(
+            training_metrics[
+                "gender_accuracy"
+            ],
+            4,
+        ),
+        "evaluated_validation_age_mae": round(
+            validation_metrics[
+                "age_mae"
+            ],
+            4,
+        ),
+        "evaluated_validation_gender_accuracy": round(
+            validation_metrics[
+                "gender_accuracy"
+            ],
+            4,
+        ),
     }
 
     print(
@@ -1663,165 +2556,35 @@ def train_final_cnn(
         f"{history_path}"
     )
 
+    output_prefix = (
+        f"cnn_{scenario}"
+    )
+
+    generate_single_run_training_plots(
+        history.history,
+        scenario,
+        show_plot=True,
+    )
+
+    generate_cnn_architecture_visualisation(
+        model,
+        output_prefix=output_prefix,
+        show_plot=True,
+    )
+
+    generate_cnn_sample_predictions(
+        model,
+        validation_records,
+        output_prefix=output_prefix,
+        num_samples=10,
+        show_plot=True,
+    )
+
     return history.history, result
 
 
 # ---------------------------------------------------------------------------
-# 15. Final Training Curves
-# ---------------------------------------------------------------------------
-
-def save_metric_comparison_plot(
-    histories,
-    metric,
-    validation_metric,
-    title,
-    y_label,
-    filename,
-):
-    """
-    Save a training and validation curve comparing final CNN scenarios.
-
-    Parameters
-    ----------
-    histories : dict
-        Histories for the original and augmented scenarios.
-
-    metric : str
-        Training metric key.
-
-    validation_metric : str
-        Validation metric key.
-
-    title : str
-        Plot title.
-
-    y_label : str
-        Vertical-axis label.
-
-    filename : str
-        Output PNG filename.
-    """
-
-    figure = plt.figure(
-        figsize=(8, 6)
-    )
-
-    for scenario, history in histories.items():
-        epochs = range(
-            1,
-            len(history[metric]) + 1,
-        )
-
-        label_name = scenario.capitalize()
-
-        plt.plot(
-            epochs,
-            history[metric],
-            label=f"{label_name} Training",
-        )
-
-        plt.plot(
-            epochs,
-            history[validation_metric],
-            linestyle="--",
-            label=f"{label_name} Validation",
-        )
-
-    plt.title(
-        title
-    )
-
-    plt.xlabel(
-        "Epoch"
-    )
-
-    plt.ylabel(
-        y_label
-    )
-
-    plt.legend()
-
-    plt.grid(
-        alpha=0.3
-    )
-
-    plt.tight_layout()
-
-    output_path = (
-        OUTPUT_DIR
-        / filename
-    )
-
-    figure.savefig(
-        output_path,
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-    plt.close(
-        figure
-    )
-
-    print(
-        f"Saved figure: "
-        f"{output_path}"
-    )
-
-
-def generate_final_training_plots(histories):
-    """
-    Generate the CNN curves required for the assessment report.
-
-    The following comparisons are generated:
-
-    - Age Mean Absolute Error
-    - Gender classification accuracy
-    - Age regression loss
-    - Gender classification loss
-    """
-
-    print("\nGenerating Final CNN Curves")
-    print("---------------------------")
-
-    save_metric_comparison_plot(
-        histories,
-        metric="age_mae",
-        validation_metric="val_age_mae",
-        title="CNN Age Mean Absolute Error",
-        y_label="Mean Absolute Error (Years)",
-        filename="cnn_age_mae_comparison.png",
-    )
-
-    save_metric_comparison_plot(
-        histories,
-        metric="gender_accuracy",
-        validation_metric="val_gender_accuracy",
-        title="CNN Gender Classification Accuracy",
-        y_label="Accuracy",
-        filename="cnn_gender_accuracy_comparison.png",
-    )
-
-    save_metric_comparison_plot(
-        histories,
-        metric="age_loss",
-        validation_metric="val_age_loss",
-        title="CNN Age Regression Loss",
-        y_label="Mean Squared Error",
-        filename="cnn_age_loss_comparison.png",
-    )
-
-    save_metric_comparison_plot(
-        histories,
-        metric="gender_loss",
-        validation_metric="val_gender_loss",
-        title="CNN Gender Classification Loss",
-        y_label="Binary Cross-Entropy",
-        filename="cnn_gender_loss_comparison.png",
-    )
-
-
-# ---------------------------------------------------------------------------
-# 16. Final Original-vs-Augmented Comparison
+# 20. Final Original-vs-Augmented Comparison
 # ---------------------------------------------------------------------------
 
 def run_final_cnn_comparison(
@@ -1830,6 +2593,10 @@ def run_final_cnn_comparison(
 ):
     """
     Train and compare the selected CNN with and without augmentation.
+
+    This helper is retained for reproducible report generation. The normal
+    assessment interface runs the two scenarios individually through the
+    three-option menu.
 
     Returns
     -------
@@ -1840,7 +2607,6 @@ def run_final_cnn_comparison(
     histories = {}
     results = []
 
-    # Scenario 1: original preprocessed dataset.
     original_history, original_result = train_final_cnn(
         train_records,
         validation_records,
@@ -1848,13 +2614,14 @@ def run_final_cnn_comparison(
         use_augmentation=False,
     )
 
-    histories["original"] = original_history
+    histories["original"] = (
+        original_history
+    )
 
     results.append(
         original_result
     )
 
-    # Scenario 2: same CNN with training-time augmentation.
     augmented_history, augmented_result = train_final_cnn(
         train_records,
         validation_records,
@@ -1862,7 +2629,9 @@ def run_final_cnn_comparison(
         use_augmentation=True,
     )
 
-    histories["augmented"] = augmented_history
+    histories["augmented"] = (
+        augmented_history
+    )
 
     results.append(
         augmented_result
@@ -1907,621 +2676,165 @@ def run_final_cnn_comparison(
 
     return results_table
 
+
 # ---------------------------------------------------------------------------
-# 17. CNN Architecture Visualisation
+# 21. Application Menu
 # ---------------------------------------------------------------------------
 
-def generate_cnn_architecture_visualisation():
+def display_main_menu():
     """
-    Generate and save a visual representation of the trained CNN.
-
-    The graph-based Visualkeras renderer is used because the CNN contains
-    a shared convolutional backbone followed by separate age-regression
-    and gender-classification branches.
-
-    The saved original-data model is used so architecture generation does
-    not require the network to be retrained.
-
-    Returns
-    -------
-    pathlib.Path or None
-        Path to the generated architecture image, or None if the saved
-        model is unavailable.
+    Display the three-option menu required by the assessment specification.
     """
 
-    model_path = (
-        OUTPUT_DIR
-        / "cnn_original.keras"
-    )
-
-    if not model_path.exists():
-        print("\nCNN Architecture Visualisation")
-        print("------------------------------")
-        print(
-            f"Saved model not found: "
-            f"{model_path}"
-        )
-
-        return None
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    output_path = (
-        OUTPUT_DIR
-        / "cnn_architecture_graph.png"
-    )
-
-    # Load the trained model without restoring optimisation state because
-    # only its network structure is required for visualisation.
-    model = tf.keras.models.load_model(
-        model_path,
-        compile=False,
-    )
-
-    # Graph view preserves the branching structure of the multi-output CNN.
-    architecture_image = visualkeras.graph_view(
-        model,
-        to_file=str(output_path),
-    )
-
-    print("\nCNN Architecture Visualisation")
-    print("------------------------------")
     print(
-        f"Loaded model: "
-        f"{model_path}"
+        "\nCOIT29225 Assessment 3"
     )
+
     print(
-        f"Architecture saved to: "
-        f"{output_path}"
+        "CNN Age and Gender Estimation"
     )
 
-    # Display the generated architecture at a manageable window size.
-    figure = plt.figure(
-        figsize=(10, 8)
+    print(
+        "============================="
     )
 
-    plt.imshow(
-        architecture_image
+    print(
+        "1. Run CNN"
     )
 
-    plt.title(
-        "UTKFace Multi-Output CNN Architecture"
+    print(
+        "2. Run CNN with data augmentation"
     )
 
-    plt.axis(
-        "off"
+    print(
+        "3. Quit"
     )
 
-    plt.tight_layout()
 
-    plt.show()
-
-    plt.close(
-        figure
-    )
-
-    return output_path
-
-
-# ---------------------------------------------------------------------------
-# 18. CNN Sample Predictions
-# ---------------------------------------------------------------------------
-
-def generate_cnn_sample_predictions(
+def run_menu(
+    train_records,
     validation_records,
-    num_samples=10,
 ):
     """
-    Generate age and gender predictions for validation images.
+    Run the assessment-required CNN application menu.
 
-    A reproducible random sample is selected from the validation subset.
-    The saved original-data CNN is loaded so predictions can be generated
-    without retraining the network.
+    Option 1 trains and evaluates the selected CNN using the original
+    preprocessed dataset.
 
-    For each sample, the figure shows:
+    Option 2 trains and evaluates the same CNN configuration with data
+    augmentation.
 
-    - Actual age
-    - Predicted age
-    - Actual gender
-    - Predicted gender
-
-    A CSV file containing the numerical prediction results is also saved.
-
-    Parameters
-    ----------
-    validation_records : list
-        Metadata records assigned to the validation subset.
-
-    num_samples : int, optional
-        Number of validation images to predict. The default is 10.
-
-    Returns
-    -------
-    pandas.DataFrame or None
-        Prediction results, or None when the saved model is unavailable.
+    Option 3 exits the application.
     """
 
-    model_path = (
-        OUTPUT_DIR
-        / "cnn_original.keras"
-    )
+    while True:
+        display_main_menu()
 
-    if not model_path.exists():
-        print("\nCNN Sample Predictions")
-        print("----------------------")
-        print(
-            f"Saved model not found: "
-            f"{model_path}"
-        )
+        choice = input(
+            "\nSelect an option (1-3): "
+        ).strip()
 
-        return None
+        if choice == "1":
+            print(
+                "\nRunning CNN using "
+                "the original dataset..."
+            )
 
-    num_samples = min(
-        num_samples,
-        len(validation_records),
-    )
+            train_final_cnn(
+                train_records,
+                validation_records,
+                SELECTED_CNN_CONFIGURATION,
+                use_augmentation=False,
+            )
 
-    # Select a reproducible random validation sample.
-    random_generator = Random(
-        RANDOM_SEED
-    )
+        elif choice == "2":
+            print(
+                "\nRunning CNN with "
+                "data augmentation..."
+            )
 
-    sample_records = random_generator.sample(
-        validation_records,
-        num_samples,
-    )
+            train_final_cnn(
+                train_records,
+                validation_records,
+                SELECTED_CNN_CONFIGURATION,
+                use_augmentation=True,
+            )
 
-    # Create a dataset without shuffling so image order remains aligned
-    # with the selected metadata records.
-    sample_dataset = create_tf_dataset(
-        sample_records,
-        training=False,
-        batch_size=num_samples,
-    )
+        elif choice == "3":
+            print(
+                "\nExiting application."
+            )
 
-    images, labels = next(
-        iter(sample_dataset)
-    )
+            break
 
-    # Load the trained original-data model without restoring its optimiser.
-    model = tf.keras.models.load_model(
-        model_path,
-        compile=False,
-    )
-
-    # Perform inference only. Augmentation and dropout are disabled.
-    predictions = model(
-        images,
-        training=False,
-    )
-
-    predicted_ages = (
-        predictions["age"]
-        .numpy()
-        .reshape(-1)
-    )
-
-    gender_probabilities = (
-        predictions["gender"]
-        .numpy()
-        .reshape(-1)
-    )
-
-    predicted_genders = (
-        gender_probabilities >= 0.5
-    ).astype(int)
-
-    actual_ages = (
-        labels["age"]
-        .numpy()
-        .astype(int)
-    )
-
-    actual_genders = (
-        labels["gender"]
-        .numpy()
-        .astype(int)
-    )
-
-    prediction_rows = []
-
-    for index in range(num_samples):
-        prediction_rows.append(
-            {
-                "filename": (
-                    sample_records[index][
-                        "image_path"
-                    ].name
-                ),
-                "actual_age": (
-                    actual_ages[index]
-                ),
-                "predicted_age": round(
-                    float(
-                        predicted_ages[index]
-                    ),
-                    2,
-                ),
-                "absolute_age_error": round(
-                    abs(
-                        float(
-                            predicted_ages[index]
-                        )
-                        - actual_ages[index]
-                    ),
-                    2,
-                ),
-                "actual_gender": (
-                    actual_genders[index]
-                ),
-                "predicted_gender": (
-                    predicted_genders[index]
-                ),
-                "gender_probability": round(
-                    float(
-                        gender_probabilities[index]
-                    ),
-                    4,
-                ),
-            }
-        )
-
-    results_table = pd.DataFrame(
-        prediction_rows
-    )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    csv_path = (
-        OUTPUT_DIR
-        / "cnn_sample_predictions.csv"
-    )
-
-    results_table.to_csv(
-        csv_path,
-        index=False,
-    )
-
-    # ---------------------------------------------------------------
-    # Prediction visualisation
-    # ---------------------------------------------------------------
-
-    columns = 5
-
-    rows = (
-        num_samples
-        + columns
-        - 1
-    ) // columns
-
-    figure, axes = plt.subplots(
-        rows,
-        columns,
-        figsize=(15, 7),
-    )
-
-    axes = axes.flatten()
-
-    for index in range(num_samples):
-        axes[index].imshow(
-            images[index].numpy()
-        )
-
-        title = (
-            f"Age: {actual_ages[index]} "
-            f"→ {predicted_ages[index]:.1f}\n"
-            f"Gender: {actual_genders[index]} "
-            f"→ {predicted_genders[index]}"
-        )
-
-        axes[index].set_title(
-            title,
-            fontsize=10,
-        )
-
-        axes[index].axis(
-            "off"
-        )
-
-    for index in range(
-        num_samples,
-        len(axes),
-    ):
-        axes[index].axis(
-            "off"
-        )
-
-    figure.suptitle(
-        "CNN Age and Gender Predictions",
-        fontsize=14,
-    )
-
-    figure.tight_layout(
-        rect=(0, 0, 1, 0.95),
-        h_pad=1.5,
-        w_pad=1.0,
-    )
-
-    figure_path = (
-        OUTPUT_DIR
-        / "cnn_sample_predictions.png"
-    )
-
-    figure.savefig(
-        figure_path,
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-    print("\nCNN Sample Predictions")
-    print("----------------------")
-
-    print(
-        results_table[
-            [
-                "actual_age",
-                "predicted_age",
-                "absolute_age_error",
-                "actual_gender",
-                "predicted_gender",
-                "gender_probability",
-            ]
-        ].to_string(
-            index=False
-        )
-    )
-
-    print(
-        f"\nPrediction figure saved to: "
-        f"{figure_path}"
-    )
-
-    print(
-        f"Prediction data saved to: "
-        f"{csv_path}"
-    )
-
-    plt.show()
-
-    plt.close(
-        figure
-    )
-
-    return results_table
+        else:
+            print(
+                "\nInvalid selection. "
+                "Please enter 1, 2, or 3."
+            )
 
 
 # ---------------------------------------------------------------------------
-# 19. Main Program
+# 22. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
-    """Run the current UTKFace CNN development and evaluation pipeline."""
+    """
+    Load UTKFace metadata and launch the required CNN application menu.
+    """
 
     if not DATASET_PATH.exists():
         print(
-            f"Dataset folder not found: "
+            f"\nDataset folder not found: "
             f"{DATASET_PATH}"
         )
 
         return
 
-    # ------------------------------------------------------------------
-    # Dataset loading and exploration
-    # ------------------------------------------------------------------
+    print(
+        "\nLoading UTKFace dataset..."
+    )
 
     records, invalid_files = load_metadata(
         DATASET_PATH
     )
 
-    display_dataset_summary(
-        records,
-        invalid_files,
-    )
+    if not records:
+        print(
+            "No valid UTKFace images were found."
+        )
+
+        return
 
     train_records, validation_records = split_records(
         records
     )
 
-    print("\nDataset Split")
-    print("-------------")
-
     print(
-        f"Training records: "
-        f"{len(train_records)}"
+        f"Valid images: "
+        f"{len(records):,}"
     )
 
     print(
-        f"Validation records: "
-        f"{len(validation_records)}"
+        f"Invalid images: "
+        f"{len(invalid_files):,}"
     )
 
-    # ------------------------------------------------------------------
-    # Verify TensorFlow input pipelines
-    # ------------------------------------------------------------------
+    print(
+        f"Training images: "
+        f"{len(train_records):,}"
+    )
 
-    train_dataset = create_tf_dataset(
+    print(
+        f"Validation images: "
+        f"{len(validation_records):,}"
+    )
+
+    run_menu(
         train_records,
-        training=True,
-    )
-
-    validation_dataset = create_tf_dataset(
         validation_records,
-        training=False,
     )
 
-    print("\nTensorFlow Dataset Test")
-    print("-----------------------")
-
-    train_images, train_labels = next(
-        iter(train_dataset)
-    )
-
-    print("\nTraining batch:")
-
-    print(
-        f"Image batch shape: "
-        f"{train_images.shape}"
-    )
-
-    print(
-        f"Gender batch shape: "
-        f"{train_labels['gender'].shape}"
-    )
-
-    print(
-        f"Age batch shape: "
-        f"{train_labels['age'].shape}"
-    )
-
-    print(
-        f"Minimum pixel value: "
-        f"{tf.reduce_min(train_images).numpy():.4f}"
-    )
-
-    print(
-        f"Maximum pixel value: "
-        f"{tf.reduce_max(train_images).numpy():.4f}"
-    )
-
-    validation_images, validation_labels = next(
-        iter(validation_dataset)
-    )
-
-    print("\nValidation batch:")
-
-    print(
-        f"Image batch shape: "
-        f"{validation_images.shape}"
-    )
-
-    print(
-        f"Gender batch shape: "
-        f"{validation_labels['gender'].shape}"
-    )
-
-    print(
-        f"Age batch shape: "
-        f"{validation_labels['age'].shape}"
-    )
-
-    print(
-        f"Minimum pixel value: "
-        f"{tf.reduce_min(validation_images).numpy():.4f}"
-    )
-
-    print(
-        f"Maximum pixel value: "
-        f"{tf.reduce_max(validation_images).numpy():.4f}"
-    )
-
-    # ------------------------------------------------------------------
-    # Development visualisations
-    # ------------------------------------------------------------------
-    #
-    # These functions remain available but are not displayed automatically
-    # during long training runs.
-    #
-    # Uncomment when visual inspection is required.
-    #
-    # visualise_preprocessed_images(
-    #     validation_dataset,
-    #     num_images=9,
-    # )
-    #
-    # augmentation = create_data_augmentation()
-    #
-    # visualise_augmented_images(
-    #     validation_dataset,
-    #     augmentation,
-    #     num_images=9,
-    # )
-
-    # ------------------------------------------------------------------
-    # Display selected baseline architecture
-    # ------------------------------------------------------------------
-
-    model = build_cnn_model(
-        use_augmentation=False,
-        filters=SELECTED_CNN_CONFIGURATION[
-            "filters"
-        ],
-        dense_units=SELECTED_CNN_CONFIGURATION[
-            "dense_units"
-        ],
-        dropout_rate=SELECTED_CNN_CONFIGURATION[
-            "dropout_rate"
-        ],
-    )
-
-    model = compile_cnn_model(
-        model,
-        learning_rate=SELECTED_CNN_CONFIGURATION[
-            "learning_rate"
-        ],
-    )
-
-    print("\nCNN Architecture")
-    print("----------------")
-
-    model.summary()
-
-    # ------------------------------------------------------------------
-    # Development smoke test
-    # ------------------------------------------------------------------
-    #
-    # The smoke test has already verified that the model can perform
-    # forward propagation, backpropagation, and validation successfully.
-    #
-    # run_training_smoke_test(
-    #     model,
-    #     train_dataset,
-    #     validation_dataset,
-    # )
-
-    # ------------------------------------------------------------------
-    # Parameter configurations
-    # ------------------------------------------------------------------
-
-    display_cnn_configurations()
-
-    # Parameter tuning has already been completed.
-    # Uncomment this only when parameter experiments need to be repeated.
-    #
-    # run_cnn_experiments(
-    #     train_records,
-    #     validation_records,
-    #     CNN_CONFIGURATIONS,
-    # )
-
-    # Final original-vs-augmentation training has already been completed.
-    # Uncomment only if the final models need to be retrained.
-    #
-    # run_final_cnn_comparison(
-    #     train_records,
-    #     validation_records,
-    # )
-    
-    # Generate the CNN architecture diagram from the saved final model.
-    generate_cnn_architecture_visualisation()
-
-
-    # Generate ten reproducible prediction examples from the
-    # validation subset using the saved final original-data model.
-    generate_cnn_sample_predictions(
-        validation_records,
-        num_samples=10,
-    )
-
-    
-
-
-    
 
 if __name__ == "__main__":
     main()
