@@ -78,6 +78,12 @@ DENSE_UNITS = 128
 SMOKE_TEST_TRAIN_BATCHES = 5
 SMOKE_TEST_VALIDATION_BATCHES = 2
 
+# Number of epochs used for preliminary CNN parameter experiments.
+EXPERIMENT_EPOCHS = 5
+
+# Number of epochs used later for the selected final configuration.
+FINAL_TRAINING_EPOCHS = 10
+
 
 # ---------------------------------------------------------------------------
 # 2. UTKFace Metadata Parsing
@@ -1024,8 +1030,82 @@ def run_training_smoke_test(
     return history
 
 
+
 # ---------------------------------------------------------------------------
-# 12. Main Program
+# 12. CNN Experiment Configuration
+# ---------------------------------------------------------------------------
+
+CNN_CONFIGURATIONS = [
+    {
+        "name": "A_baseline",
+        "filters": (32, 64, 128),
+        "dense_units": 128,
+        "dropout_rate": 0.30,
+        "learning_rate": 0.001,
+    },
+    {
+        "name": "B_compact",
+        "filters": (16, 32, 64),
+        "dense_units": 64,
+        "dropout_rate": 0.30,
+        "learning_rate": 0.001,
+    },
+    {
+        "name": "C_wider",
+        "filters": (32, 64, 128, 256),
+        "dense_units": 128,
+        "dropout_rate": 0.30,
+        "learning_rate": 0.001,
+    },
+    {
+        "name": "D_regularised",
+        "filters": (32, 64, 128),
+        "dense_units": 128,
+        "dropout_rate": 0.50,
+        "learning_rate": 0.0005,
+    },
+]
+
+def display_cnn_configurations():
+    """
+    Display the CNN configurations prepared for parameter experiments.
+
+    The configurations vary architectural and algorithmic parameters so
+    their effects on age regression and gender classification performance
+    can be compared systematically.
+    """
+
+    print("\nCNN Experiment Configurations")
+    print("-----------------------------")
+
+    for configuration in CNN_CONFIGURATIONS:
+        print(
+            f"\n{configuration['name']}"
+        )
+        print(
+            f"Filters: "
+            f"{configuration['filters']}"
+        )
+        print(
+            f"Dense units: "
+            f"{configuration['dense_units']}"
+        )
+        print(
+            f"Dropout rate: "
+            f"{configuration['dropout_rate']}"
+        )
+        print(
+            f"Learning rate: "
+            f"{configuration['learning_rate']}"
+        )
+
+    print(
+        f"\nPreliminary experiment epochs: "
+        f"{EXPERIMENT_EPOCHS}"
+    )
+
+# ---------------------------------------------------------------------------
+# 13. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -1179,6 +1259,10 @@ def main():
         train_dataset,
         validation_dataset,
     )
+
+    # Display the parameter configurations that will be evaluated
+    # during the CNN tuning stage.
+    display_cnn_configurations()
 
 if __name__ == "__main__":
     main()
