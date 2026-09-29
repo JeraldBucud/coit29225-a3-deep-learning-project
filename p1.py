@@ -63,6 +63,11 @@ VALIDATION_SPLIT = 0.20
 # A fixed random seed keeps dataset splitting and shuffling reproducible.
 RANDOM_SEED = 42
 
+# Data augmentation settings used for the augmented CNN experiment.
+AUGMENTATION_ROTATION = 0.05
+AUGMENTATION_ZOOM = 0.10
+AUGMENTATION_CONTRAST = 0.10
+
 
 # ---------------------------------------------------------------------------
 # 2. UTKFace Metadata Parsing
@@ -496,12 +501,8 @@ def visualise_preprocessed_images(dataset, num_images=9):
     figure, axes = plt.subplots(
         rows,
         columns,
-        figsize=(
-            10,
-            3.5 * rows,
-        ),
+        figsize=(8, 8),
     )
-
     # Flatten the subplot array so each position can be accessed using
     # a single index.
     axes = axes.flatten()
@@ -584,8 +585,174 @@ def visualise_preprocessed_images(dataset, num_images=9):
     )
 
 
+
 # ---------------------------------------------------------------------------
-# 8. Main Program
+# 8. Data Augmentation
+# ---------------------------------------------------------------------------
+
+def create_data_augmentation():
+    """
+    Create the image augmentation pipeline used during CNN training.
+
+    The transformations are intentionally conservative so that facial
+    characteristics important for age and gender prediction are preserved.
+
+    Augmentation is applied only during training and is disabled
+    automatically during validation and prediction.
+
+    Returns
+    -------
+    tf.keras.Sequential
+        Keras preprocessing pipeline containing the augmentation layers.
+    """
+
+    return tf.keras.Sequential(
+        [
+            tf.keras.layers.RandomFlip(
+                "horizontal"
+            ),
+            tf.keras.layers.RandomRotation(
+                AUGMENTATION_ROTATION
+            ),
+            tf.keras.layers.RandomZoom(
+                AUGMENTATION_ZOOM
+            ),
+            tf.keras.layers.RandomContrast(
+                AUGMENTATION_CONTRAST
+            ),
+
+            # Keep augmented values within the same 0-1 range used by
+            # the normal preprocessing pipeline.
+            tf.keras.layers.ReLU(
+                max_value=1.0,
+                name="clip_augmented_pixels",
+            ),
+        ],
+        name="data_augmentation",
+    )
+
+def visualise_augmented_images(dataset, augmentation, num_images=9):
+    """
+    Display and save augmented versions of preprocessed UTKFace images.
+
+    This visual inspection helps confirm that augmentation introduces useful
+    variation without excessively distorting facial characteristics.
+
+    Parameters
+    ----------
+    dataset : tf.data.Dataset
+        Preprocessed TensorFlow dataset.
+
+    augmentation : tf.keras.Sequential
+        Data augmentation pipeline.
+
+    num_images : int, optional
+        Number of augmented images to display. The default is 9.
+    """
+
+    images, labels = next(
+        iter(dataset)
+    )
+
+    num_images = min(
+        num_images,
+        int(images.shape[0]),
+    )
+
+    # Force augmentation during this visual test.
+    augmented_images = augmentation(
+        images[:num_images],
+        training=True,
+    )
+
+    columns = 3
+
+    rows = (
+        num_images
+        + columns
+        - 1
+    ) // columns
+
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(8, 8),
+    )
+
+    axes = axes.flatten()
+
+    for index in range(num_images):
+        age = int(
+            labels["age"][index].numpy()
+        )
+
+        gender = int(
+            labels["gender"][index].numpy()
+        )
+
+        axes[index].imshow(
+            augmented_images[index].numpy()
+        )
+
+        axes[index].set_title(
+            f"Age: {age} | Gender: {gender}"
+        )
+
+        axes[index].axis(
+            "off"
+        )
+
+    for index in range(
+        num_images,
+        len(axes),
+    ):
+        axes[index].axis(
+            "off"
+        )
+
+    figure.suptitle(
+        "Augmented UTKFace Samples",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(0, 0, 1, 0.95),
+        h_pad=1.2,
+        w_pad=0.8,
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / "utkface_augmented_samples.png"
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    print("\nData Augmentation Visualisation")
+    print("-------------------------------")
+    print(
+        f"Saved figure: "
+        f"{output_path}"
+    )
+
+    plt.show()
+
+    plt.close(
+        figure
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -701,6 +868,16 @@ def main():
     # data is used because it is not shuffled between program runs.
     visualise_preprocessed_images(
         validation_dataset,
+        num_images=9,
+    )
+
+        # Build the augmentation pipeline for the augmented CNN experiment.
+    augmentation = create_data_augmentation()
+
+    # Visually inspect augmented samples before using them for training.
+    visualise_augmented_images(
+        validation_dataset,
+        augmentation,
         num_images=9,
     )
 
