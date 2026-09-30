@@ -32,8 +32,9 @@ evaluation, and visualisation are added in later development stages.
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-
+from sklearn.preprocessing import MinMaxScaler
 
 # ---------------------------------------------------------------------------
 # 1. Configuration
@@ -67,6 +68,11 @@ EXPECTED_RECORDS = 254
 TRAINING_DAYS = 204
 FORECAST_DAYS = 50
 
+# Assessment-required LSTM time-step settings.
+TIME_STEPS = (
+    5,
+    10,
+)
 
 # ---------------------------------------------------------------------------
 # 2. Stock Data Loading and Validation
@@ -257,7 +263,287 @@ def split_stock_data(stock_data):
 
 
 # ---------------------------------------------------------------------------
-# 4. Dataset Summary
+# 4. Closing-Price Scaling
+# ---------------------------------------------------------------------------
+
+def prepare_scaled_prices(
+    training_data,
+    forecast_data,
+):
+    """
+    Scale stock closing prices using training data only.
+
+    MinMaxScaler is fitted exclusively on the first 204 training
+    observations. This prevents information from the 50 future
+    observations leaking into the model preparation process.
+
+    Parameters
+    ----------
+    training_data : pandas.DataFrame
+        First 204 chronological stock observations.
+
+    forecast_data : pandas.DataFrame
+        Final 50 observations reserved for forecasting/testing.
+
+    Returns
+    -------
+    tuple
+        Fitted scaler, scaled training prices, and scaled forecast prices.
+    """
+
+    training_prices = training_data[
+        [CLOSE_COLUMN]
+    ].to_numpy(
+        dtype=np.float32
+    )
+
+    forecast_prices = forecast_data[
+        [CLOSE_COLUMN]
+    ].to_numpy(
+        dtype=np.float32
+    )
+
+    scaler = MinMaxScaler(
+        feature_range=(0, 1)
+    )
+
+    # Fit only on historical training values.
+    scaled_training_prices = scaler.fit_transform(
+        training_prices
+    )
+
+    # Apply the already-fitted scaler to future values.
+    scaled_forecast_prices = scaler.transform(
+        forecast_prices
+    )
+
+    return (
+        scaler,
+        scaled_training_prices,
+        scaled_forecast_prices,
+    )
+
+# ---------------------------------------------------------------------------
+# 5. LSTM Sequence Creation
+# ---------------------------------------------------------------------------
+
+def create_lstm_sequences(
+    scaled_prices,
+    time_step,
+):
+    """
+    Convert a scaled stock-price series into supervised LSTM sequences.
+
+    For example, with a time step of 5:
+
+        [day 1, day 2, day 3, day 4, day 5] -> day 6
+        [day 2, day 3, day 4, day 5, day 6] -> day 7
+
+    Parameters
+    ----------
+    scaled_prices : numpy.ndarray
+        Scaled closing-price values with shape (observations, 1).
+
+    time_step : int
+        Number of previous trading days used to predict the next day.
+
+    Returns
+    -------
+    tuple
+        LSTM input tensor X and target vector y.
+    """
+
+    if time_step <= 0:
+        raise ValueError(
+            "Time step must be greater than zero."
+        )
+
+    if len(scaled_prices) <= time_step:
+        raise ValueError(
+            "Insufficient observations for the requested "
+            f"time step of {time_step}."
+        )
+
+    sequences = []
+    targets = []
+
+    for index in range(
+        time_step,
+        len(scaled_prices),
+    ):
+        sequence = scaled_prices[
+            index - time_step:index
+        ]
+
+        target = scaled_prices[
+            index,
+            0,
+        ]
+
+        sequences.append(
+            sequence
+        )
+
+        targets.append(
+            target
+        )
+
+    X = np.asarray(
+        sequences,
+        dtype=np.float32,
+    )
+
+    y = np.asarray(
+        targets,
+        dtype=np.float32,
+    )
+
+    return X, y
+
+def prepare_lstm_data(
+    training_data,
+    forecast_data,
+    time_step,
+):
+    """
+    Prepare scaled stock prices and training sequences for one time step.
+
+    Parameters
+    ----------
+    training_data : pandas.DataFrame
+        First 204 historical observations.
+
+    forecast_data : pandas.DataFrame
+        Final 50 observations reserved for forecasting/testing.
+
+    time_step : int
+        Number of historical values supplied to the LSTM.
+
+    Returns
+    -------
+    dict
+        Fitted scaler, scaled datasets, and LSTM training arrays.
+    """
+
+    (
+        scaler,
+        scaled_training_prices,
+        scaled_forecast_prices,
+    ) = prepare_scaled_prices(
+        training_data,
+        forecast_data,
+    )
+
+    X_train, y_train = create_lstm_sequences(
+        scaled_training_prices,
+        time_step,
+    )
+
+    return {
+        "scaler": scaler,
+        "scaled_training": scaled_training_prices,
+        "scaled_forecast": scaled_forecast_prices,
+        "X_train": X_train,
+        "y_train": y_train,
+    }
+
+# ---------------------------------------------------------------------------
+# 6. LSTM Data Preparation Summary
+# ---------------------------------------------------------------------------
+
+def display_lstm_preparation_summary(
+    stock_code,
+    training_data,
+    prepared_data,
+    time_step,
+):
+    """
+    Display the shapes and scaling information prepared for the LSTM.
+    """
+
+    scaled_training = prepared_data[
+        "scaled_training"
+    ]
+
+    scaled_forecast = prepared_data[
+        "scaled_forecast"
+    ]
+
+    X_train = prepared_data[
+        "X_train"
+    ]
+
+    y_train = prepared_data[
+        "y_train"
+    ]
+
+    expected_sequences = (
+        len(training_data)
+        - time_step
+    )
+
+    print(
+        f"\n{stock_code} - Time Step {time_step}"
+    )
+
+    print(
+        "-" * 40
+    )
+
+    print(
+        f"Training observations: "
+        f"{len(training_data)}"
+    )
+
+    print(
+        f"Expected sequences: "
+        f"{expected_sequences}"
+    )
+
+    print(
+        f"Generated sequences: "
+        f"{len(X_train)}"
+    )
+
+    print(
+        f"X_train shape: "
+        f"{X_train.shape}"
+    )
+
+    print(
+        f"y_train shape: "
+        f"{y_train.shape}"
+    )
+
+    print(
+        f"Training scaled minimum: "
+        f"{scaled_training.min():.4f}"
+    )
+
+    print(
+        f"Training scaled maximum: "
+        f"{scaled_training.max():.4f}"
+    )
+
+    print(
+        f"Forecast scaled minimum: "
+        f"{scaled_forecast.min():.4f}"
+    )
+
+    print(
+        f"Forecast scaled maximum: "
+        f"{scaled_forecast.max():.4f}"
+    )
+
+    if len(X_train) != expected_sequences:
+        raise ValueError(
+            f"{stock_code}: unexpected number "
+            "of generated sequences."
+        )
+
+    
+# ---------------------------------------------------------------------------
+# 7. Dataset Summary
 # ---------------------------------------------------------------------------
 
 def display_stock_summary(
@@ -389,7 +675,7 @@ def display_stock_summary(
 
 
 # ---------------------------------------------------------------------------
-# 5. Assigned Mining Group Loader
+# 8. Assigned Mining Group Loader
 # ---------------------------------------------------------------------------
 
 def load_assigned_stocks():
@@ -428,7 +714,7 @@ def load_assigned_stocks():
 
 
 # ---------------------------------------------------------------------------
-# 6. Main Program
+# 9. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
@@ -483,6 +769,36 @@ def main():
     print(
         "Chronological preprocessing "
         "and 204/50 splitting complete."
+    )
+
+    print(
+    "\nLSTM Sequence Preparation"
+    )
+
+    print(
+        "========================="
+    )
+
+    for stock_code, datasets in stock_datasets.items():
+
+        for time_step in TIME_STEPS:
+
+            prepared_data = prepare_lstm_data(
+                datasets["training"],
+                datasets["forecast"],
+                time_step,
+            )
+
+            display_lstm_preparation_summary(
+                stock_code,
+                datasets["training"],
+                prepared_data,
+                time_step,
+            )
+
+    print(
+        "\nLSTM scaling and sequence "
+        "preparation complete."
     )
 
 
