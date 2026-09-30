@@ -17,24 +17,31 @@ The supplied CSV files contain approximately 254 trading days and are
 stored in reverse chronological order, from the newest date to the
 oldest date.
 
-The program therefore:
+The program currently performs the following stages:
 
 1. Loads the assigned stock CSV files.
 2. Extracts the Date and Close $ columns.
 3. Validates dates and closing prices.
 4. Converts the data into chronological order.
-5. Uses the first 204 observations as the training period.
+5. Uses the first 204 observations as the historical training period.
 6. Uses the remaining 50 observations as the forecasting/testing period.
+7. Scales closing prices using training data only.
+8. Generates LSTM sequences for time steps 5 and 10.
+9. Creates chronological training and validation subsets.
+10. Builds and compiles a basic LSTM regression model.
+11. Runs a short smoke test to validate the LSTM training pipeline.
 
-LSTM modelling, time-step experiments, parameter tuning, RMSE
-evaluation, and visualisation are added in later development stages.
+Parameter tuning, 50-day recursive forecasting, RMSE comparison,
+visualisation, and the final assessment menu are added in later stages.
 """
 
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
+
 
 # ---------------------------------------------------------------------------
 # 1. Configuration
@@ -50,7 +57,7 @@ STOCK_FILES = {
     "FMG": DATA_DIR / "FMG.csv",
 }
 
-# Human-readable names used in program output and later report figures.
+# Human-readable stock names used in terminal output and report figures.
 STOCK_NAMES = {
     "RIO": "Rio Tinto Group",
     "BHP": "BHP Group",
@@ -73,6 +80,22 @@ TIME_STEPS = (
     5,
     10,
 )
+
+# Fraction of the generated training sequences reserved for
+# chronological validation.
+VALIDATION_FRACTION = 0.20
+
+# Fixed random seed used to improve experiment reproducibility.
+RANDOM_SEED = 42
+
+# Development-only LSTM smoke-test settings.
+SMOKE_TEST_LSTM_UNITS = 32
+SMOKE_TEST_EPOCHS = 2
+SMOKE_TEST_BATCH_SIZE = 16
+
+# Initial optimiser learning rate.
+LEARNING_RATE = 0.001
+
 
 # ---------------------------------------------------------------------------
 # 2. Stock Data Loading and Validation
@@ -312,7 +335,10 @@ def prepare_scaled_prices(
         training_prices
     )
 
-    # Apply the already-fitted scaler to future values.
+    # Apply the fitted training scaler to future observations.
+    #
+    # Values may be below 0 or above 1 when future prices fall outside
+    # the historical range. This is valid and avoids future-data leakage.
     scaled_forecast_prices = scaler.transform(
         forecast_prices
     )
@@ -322,6 +348,7 @@ def prepare_scaled_prices(
         scaled_training_prices,
         scaled_forecast_prices,
     )
+
 
 # ---------------------------------------------------------------------------
 # 5. LSTM Sequence Creation
@@ -400,13 +427,14 @@ def create_lstm_sequences(
 
     return X, y
 
+
 def prepare_lstm_data(
     training_data,
     forecast_data,
     time_step,
 ):
     """
-    Prepare scaled stock prices and training sequences for one time step.
+    Prepare scaled stock prices and LSTM sequences for one time step.
 
     Parameters
     ----------
@@ -434,7 +462,7 @@ def prepare_lstm_data(
         forecast_data,
     )
 
-    X_train, y_train = create_lstm_sequences(
+    X_sequences, y_sequences = create_lstm_sequences(
         scaled_training_prices,
         time_step,
     )
@@ -443,12 +471,364 @@ def prepare_lstm_data(
         "scaler": scaler,
         "scaled_training": scaled_training_prices,
         "scaled_forecast": scaled_forecast_prices,
-        "X_train": X_train,
-        "y_train": y_train,
+        "X_train": X_sequences,
+        "y_train": y_sequences,
     }
 
+
 # ---------------------------------------------------------------------------
-# 6. LSTM Data Preparation Summary
+# 6. Chronological Training and Validation Split
+# ---------------------------------------------------------------------------
+
+def split_lstm_sequences(
+    X,
+    y,
+    validation_fraction=VALIDATION_FRACTION,
+):
+    """
+    Split LSTM sequences chronologically into training and validation sets.
+
+    Time-series data must not be randomly shuffled because later
+    observations should not leak into earlier training examples.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Complete LSTM sequence tensor generated from the 204-day
+        historical training period.
+
+    y : numpy.ndarray
+        Corresponding target values.
+
+    validation_fraction : float, optional
+        Fraction of sequences reserved for validation.
+
+    Returns
+    -------
+    tuple
+        X_train, X_validation, y_train, y_validation.
+
+    Raises
+    ------
+    ValueError
+        If the validation fraction or resulting split is invalid.
+    """
+
+    if not 0 < validation_fraction < 1:
+        raise ValueError(
+            "Validation fraction must be between 0 and 1."
+        )
+
+    split_index = int(
+        len(X)
+        * (1 - validation_fraction)
+    )
+
+    if split_index <= 0:
+        raise ValueError(
+            "Training split contains no sequences."
+        )
+
+    if split_index >= len(X):
+        raise ValueError(
+            "Validation split contains no sequences."
+        )
+
+    # Preserve chronological ordering. Earlier sequences are used for
+    # model fitting and later sequences are used for validation.
+    X_train = X[
+        :split_index
+    ]
+
+    X_validation = X[
+        split_index:
+    ]
+
+    y_train = y[
+        :split_index
+    ]
+
+    y_validation = y[
+        split_index:
+    ]
+
+    return (
+        X_train,
+        X_validation,
+        y_train,
+        y_validation,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. LSTM Model Architecture
+# ---------------------------------------------------------------------------
+
+def build_lstm_model(
+    time_step,
+    lstm_units=SMOKE_TEST_LSTM_UNITS,
+):
+    """
+    Build a simple LSTM regression model.
+
+    The LSTM receives a sequence of previous closing prices and predicts
+    the next scaled closing price.
+
+    Parameters
+    ----------
+    time_step : int
+        Number of previous trading days supplied to the model.
+
+    lstm_units : int, optional
+        Number of neurons in the LSTM layer.
+
+    Returns
+    -------
+    tf.keras.Model
+        Uncompiled LSTM model.
+    """
+
+    model = tf.keras.Sequential(
+        [
+            tf.keras.layers.Input(
+                shape=(
+                    time_step,
+                    1,
+                ),
+                name="stock_sequence",
+            ),
+
+            tf.keras.layers.LSTM(
+                lstm_units,
+                name="lstm",
+            ),
+
+            tf.keras.layers.Dense(
+                1,
+                activation="linear",
+                name="predicted_close",
+            ),
+        ],
+        name=(
+            f"stock_lstm_"
+            f"timestep_{time_step}_"
+            f"units_{lstm_units}"
+        ),
+    )
+
+    return model
+
+
+# ---------------------------------------------------------------------------
+# 8. LSTM Model Compilation
+# ---------------------------------------------------------------------------
+
+def compile_lstm_model(
+    model,
+    learning_rate=LEARNING_RATE,
+):
+    """
+    Compile an LSTM model for stock-price regression.
+
+    Mean squared error is used as the optimisation loss while RMSE is
+    recorded as an evaluation metric because the assessment requires
+    root mean-squared error results.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        LSTM model to compile.
+
+    learning_rate : float, optional
+        Adam optimiser learning rate.
+
+    Returns
+    -------
+    tf.keras.Model
+        Compiled LSTM model.
+    """
+
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=learning_rate
+    )
+
+    model.compile(
+        optimizer=optimizer,
+        loss="mse",
+        metrics=[
+            tf.keras.metrics.RootMeanSquaredError(
+                name="rmse"
+            )
+        ],
+    )
+
+    return model
+
+
+# ---------------------------------------------------------------------------
+# 9. LSTM Training Smoke Test
+# ---------------------------------------------------------------------------
+
+def run_lstm_smoke_test(
+    stock_code,
+    training_data,
+    forecast_data,
+    time_step=5,
+):
+    """
+    Run a short LSTM training test.
+
+    This function verifies that the complete preprocessing, sequence,
+    model-building, training, and validation pipeline works correctly.
+
+    The final 50-day forecasting/testing dataset is not used for model
+    fitting or validation.
+
+    Parameters
+    ----------
+    stock_code : str
+        Stock ticker used for the smoke test.
+
+    training_data : pandas.DataFrame
+        First 204 historical observations.
+
+    forecast_data : pandas.DataFrame
+        Final 50 future observations.
+
+    time_step : int, optional
+        LSTM input sequence length.
+
+    Returns
+    -------
+    tuple
+        Trained smoke-test model and Keras History object.
+    """
+
+    prepared_data = prepare_lstm_data(
+        training_data,
+        forecast_data,
+        time_step,
+    )
+
+    (
+        X_train,
+        X_validation,
+        y_train,
+        y_validation,
+    ) = split_lstm_sequences(
+        prepared_data["X_train"],
+        prepared_data["y_train"],
+    )
+
+    print("\nLSTM Smoke Test")
+    print("===============")
+
+    print(
+        f"Stock: "
+        f"{stock_code} - {STOCK_NAMES[stock_code]}"
+    )
+
+    print(
+        f"Time step: "
+        f"{time_step}"
+    )
+
+    print(
+        f"LSTM units: "
+        f"{SMOKE_TEST_LSTM_UNITS}"
+    )
+
+    print(
+        f"Epochs: "
+        f"{SMOKE_TEST_EPOCHS}"
+    )
+
+    print(
+        f"Batch size: "
+        f"{SMOKE_TEST_BATCH_SIZE}"
+    )
+
+    print(
+        f"Training sequences: "
+        f"{len(X_train)}"
+    )
+
+    print(
+        f"Validation sequences: "
+        f"{len(X_validation)}"
+    )
+
+    print(
+        f"X_train shape: "
+        f"{X_train.shape}"
+    )
+
+    print(
+        f"y_train shape: "
+        f"{y_train.shape}"
+    )
+
+    print(
+        f"X_validation shape: "
+        f"{X_validation.shape}"
+    )
+
+    print(
+        f"y_validation shape: "
+        f"{y_validation.shape}"
+    )
+
+    # Clear any previously constructed Keras model.
+    tf.keras.backend.clear_session()
+
+    # Use a fixed random seed for reproducible development experiments.
+    tf.keras.utils.set_random_seed(
+        RANDOM_SEED
+    )
+
+    model = build_lstm_model(
+        time_step=time_step,
+        lstm_units=SMOKE_TEST_LSTM_UNITS,
+    )
+
+    model = compile_lstm_model(
+        model,
+        learning_rate=LEARNING_RATE,
+    )
+
+    print("\nLSTM Architecture")
+    print("-----------------")
+
+    model.summary()
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(
+            X_validation,
+            y_validation,
+        ),
+        epochs=SMOKE_TEST_EPOCHS,
+        batch_size=SMOKE_TEST_BATCH_SIZE,
+
+        # Do not randomly reorder time-series sequences during fitting.
+        shuffle=False,
+
+        verbose=1,
+    )
+
+    print(
+        "\nLSTM smoke test completed successfully."
+    )
+
+    return (
+        model,
+        history,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. LSTM Data Preparation Summary
 # ---------------------------------------------------------------------------
 
 def display_lstm_preparation_summary(
@@ -458,7 +838,21 @@ def display_lstm_preparation_summary(
     time_step,
 ):
     """
-    Display the shapes and scaling information prepared for the LSTM.
+    Display scaling information and tensor shapes prepared for the LSTM.
+
+    Parameters
+    ----------
+    stock_code : str
+        Stock ticker.
+
+    training_data : pandas.DataFrame
+        First 204 stock observations.
+
+    prepared_data : dict
+        Output returned by prepare_lstm_data().
+
+    time_step : int
+        Number of previous days in each LSTM input sequence.
     """
 
     scaled_training = prepared_data[
@@ -541,9 +935,9 @@ def display_lstm_preparation_summary(
             "of generated sequences."
         )
 
-    
+
 # ---------------------------------------------------------------------------
-# 7. Dataset Summary
+# 11. Dataset Summary
 # ---------------------------------------------------------------------------
 
 def display_stock_summary(
@@ -615,6 +1009,7 @@ def display_stock_summary(
     )
 
     print("\nChronological range:")
+
     print(
         f"First date: "
         f"{stock_data[DATE_COLUMN].iloc[0].strftime('%d/%m/%Y')}"
@@ -626,6 +1021,7 @@ def display_stock_summary(
     )
 
     print("\nClosing price range:")
+
     print(
         f"Minimum close: "
         f"${stock_data[CLOSE_COLUMN].min():.2f}"
@@ -642,6 +1038,7 @@ def display_stock_summary(
     )
 
     print("\nTraining period:")
+
     print(
         f"Records: "
         f"{len(training_data)}"
@@ -658,6 +1055,7 @@ def display_stock_summary(
     )
 
     print("\nForecast/testing period:")
+
     print(
         f"Records: "
         f"{len(forecast_data)}"
@@ -675,7 +1073,7 @@ def display_stock_summary(
 
 
 # ---------------------------------------------------------------------------
-# 8. Assigned Mining Group Loader
+# 12. Assigned Mining Group Loader
 # ---------------------------------------------------------------------------
 
 def load_assigned_stocks():
@@ -714,12 +1112,23 @@ def load_assigned_stocks():
 
 
 # ---------------------------------------------------------------------------
-# 9. Main Program
+# 13. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
     """
-    Run the Task 2.2 stock-data preprocessing checkpoint.
+    Run the current Task 2.2 LSTM development pipeline.
+
+    The current checkpoint validates:
+
+    - stock-data loading;
+    - chronological ordering;
+    - 204/50 splitting;
+    - MinMax scaling;
+    - time-step sequence preparation;
+    - chronological training/validation splitting;
+    - basic LSTM construction;
+    - basic LSTM model training.
     """
 
     print(
@@ -745,12 +1154,17 @@ def main():
         FileNotFoundError,
         ValueError,
     ) as error:
+
         print(
             f"\nData loading error: "
             f"{error}"
         )
 
         return
+
+    # ------------------------------------------------------------------
+    # Dataset summaries
+    # ------------------------------------------------------------------
 
     for stock_code, datasets in stock_datasets.items():
 
@@ -771,8 +1185,12 @@ def main():
         "and 204/50 splitting complete."
     )
 
+    # ------------------------------------------------------------------
+    # Verify LSTM scaling and sequence preparation
+    # ------------------------------------------------------------------
+
     print(
-    "\nLSTM Sequence Preparation"
+        "\nLSTM Sequence Preparation"
     )
 
     print(
@@ -799,6 +1217,25 @@ def main():
     print(
         "\nLSTM scaling and sequence "
         "preparation complete."
+    )
+
+    # ------------------------------------------------------------------
+    # Development LSTM smoke test
+    # ------------------------------------------------------------------
+    #
+    # Run only one small model before implementing the complete parameter
+    # experiments. RIO with time step 5 is sufficient to verify that the
+    # full Keras training and validation pipeline works.
+
+    run_lstm_smoke_test(
+        stock_code="RIO",
+        training_data=stock_datasets[
+            "RIO"
+        ]["training"],
+        forecast_data=stock_datasets[
+            "RIO"
+        ]["forecast"],
+        time_step=5,
     )
 
 
