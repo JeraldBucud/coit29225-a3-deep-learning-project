@@ -37,8 +37,8 @@ The program currently performs the following stages:
 17. Calculates final forecast RMSE in Australian dollars.
 18. Saves final prediction tables, loss curves, forecast plots, and models.
 
-The assessment-required interactive menu is added after the final
-forecasting workflow has been validated.
+The completed application includes the assessment-required interactive
+menu for running the final forecasts using time steps 5 and 10.
 """
 
 from pathlib import Path
