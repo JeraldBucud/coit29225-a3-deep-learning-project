@@ -24,7 +24,7 @@ The program currently performs the following stages:
 4. Converts the data into chronological order.
 5. Uses the first 204 observations as the historical training period.
 6. Uses the remaining 50 observations as the forecasting/testing period.
-7. Scales closing prices using training data only.
+7. Scales closing prices using historical training data only.
 8. Generates LSTM sequences for time steps 5 and 10.
 9. Creates chronological training and validation subsets.
 10. Builds and compiles LSTM regression models.
@@ -32,14 +32,19 @@ The program currently performs the following stages:
 12. Runs six controlled neuron/epoch configurations.
 13. Evaluates all configurations using validation RMSE in stock-price dollars.
 14. Identifies the best configuration for each stock and time step.
+15. Retrains each selected model using all 204 historical observations.
+16. Recursively forecasts the final 50 trading days.
+17. Calculates final forecast RMSE in Australian dollars.
+18. Saves final prediction tables, loss curves, forecast plots, and models.
 
-The final 50-day recursive forecasting, final RMSE comparison,
-visualisation, and assessment menu will be added after parameter tuning.
+The assessment-required interactive menu is added after the final
+forecasting workflow has been validated.
 """
 
 from pathlib import Path
 from time import perf_counter
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -158,6 +163,23 @@ LSTM_CONFIGURATIONS = [
         "learning_rate": 0.001,
     },
 ]
+
+
+
+# ---------------------------------------------------------------------------
+# Selected LSTM Configurations
+# ---------------------------------------------------------------------------
+
+# These configurations produced the lowest chronological validation RMSE
+# during the completed 36-run parameter experiment.
+SELECTED_LSTM_CONFIGURATIONS = {
+    ("RIO", 5): "C_32_units_20_epochs",
+    ("RIO", 10): "A_16_units_20_epochs",
+    ("BHP", 5): "F_64_units_50_epochs",
+    ("BHP", 10): "D_32_units_50_epochs",
+    ("FMG", 5): "F_64_units_50_epochs",
+    ("FMG", 10): "F_64_units_50_epochs",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1432,8 +1454,844 @@ def display_best_lstm_configurations(
             )
 
 
+
 # ---------------------------------------------------------------------------
-# 14. LSTM Data Preparation Summary
+# 14. Selected Configuration Lookup
+# ---------------------------------------------------------------------------
+
+def get_lstm_configuration(
+    configuration_name,
+):
+    """
+    Return one LSTM experiment configuration by name.
+
+    Parameters
+    ----------
+    configuration_name : str
+        Configuration name stored in SELECTED_LSTM_CONFIGURATIONS.
+
+    Returns
+    -------
+    dict
+        Matching LSTM experiment configuration.
+
+    Raises
+    ------
+    ValueError
+        If the requested configuration does not exist.
+    """
+
+    for configuration in LSTM_CONFIGURATIONS:
+
+        if configuration["name"] == configuration_name:
+            return configuration
+
+    raise ValueError(
+        f"Unknown LSTM configuration: {configuration_name}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 15. Recursive 50-Day Forecasting
+# ---------------------------------------------------------------------------
+
+def recursive_stock_forecast(
+    model,
+    scaled_training_prices,
+    time_step,
+    forecast_days=FORECAST_DAYS,
+):
+    """
+    Produce a recursive multi-day stock-price forecast.
+
+    The final historical time-step values form the initial input window.
+    Each predicted value is appended to the rolling window and becomes
+    part of the input used to predict the following day.
+
+    Actual future prices are never supplied to the model during recursive
+    forecasting.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        Trained final LSTM model.
+
+    scaled_training_prices : numpy.ndarray
+        Scaled historical closing prices from the first 204 observations.
+
+    time_step : int
+        Number of previous prices supplied to the LSTM.
+
+    forecast_days : int, optional
+        Number of future trading days to predict.
+
+    Returns
+    -------
+    numpy.ndarray
+        Recursive predictions in the scaled domain with shape
+        (forecast_days, 1).
+    """
+
+    if len(scaled_training_prices) < time_step:
+        raise ValueError(
+            "Insufficient historical prices for recursive forecasting."
+        )
+
+    forecast_window = (
+        scaled_training_prices[
+            -time_step:
+        ]
+        .reshape(-1)
+        .tolist()
+    )
+
+    predictions = []
+
+    for _ in range(forecast_days):
+
+        model_input = np.asarray(
+            forecast_window,
+            dtype=np.float32,
+        ).reshape(
+            1,
+            time_step,
+            1,
+        )
+
+        predicted_value = float(
+            model.predict(
+                model_input,
+                verbose=0,
+            )[0, 0]
+        )
+
+        predictions.append(
+            predicted_value
+        )
+
+        # Use the model prediction, not the actual future price, when
+        # preparing the next recursive input window.
+        forecast_window.append(
+            predicted_value
+        )
+
+        forecast_window = forecast_window[
+            -time_step:
+        ]
+
+    return np.asarray(
+        predictions,
+        dtype=np.float32,
+    ).reshape(
+        -1,
+        1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 16. Final LSTM Visualisations
+# ---------------------------------------------------------------------------
+
+def save_lstm_loss_plot(
+    history,
+    stock_code,
+    time_step,
+):
+    """
+    Save training and validation loss curves for a selected LSTM model.
+
+    Parameters
+    ----------
+    history : tf.keras.callbacks.History
+        Training history from the chronological train/validation stage.
+
+    stock_code : str
+        Stock ticker.
+
+    time_step : int
+        LSTM sequence length.
+
+    Returns
+    -------
+    pathlib.Path
+        Saved loss-curve path.
+    """
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    epochs = range(
+        1,
+        len(history.history["loss"]) + 1,
+    )
+
+    figure = plt.figure(
+        figsize=(9, 6)
+    )
+
+    plt.plot(
+        epochs,
+        history.history["loss"],
+        label="Training Loss",
+    )
+
+    plt.plot(
+        epochs,
+        history.history["val_loss"],
+        label="Validation Loss",
+    )
+
+    plt.title(
+        f"{stock_code} LSTM Loss - Time Step {time_step}"
+    )
+
+    plt.xlabel(
+        "Epoch"
+    )
+
+    plt.ylabel(
+        "Mean Squared Error"
+    )
+
+    plt.legend()
+
+    plt.grid(
+        alpha=0.3
+    )
+
+    plt.tight_layout()
+
+    output_path = (
+        OUTPUT_DIR
+        / f"lstm_{stock_code}_t{time_step}_loss.png"
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(
+        figure
+    )
+
+    print(
+        f"Loss curve saved to: "
+        f"{output_path}"
+    )
+
+    return output_path
+
+
+def save_stock_forecast_plot(
+    stock_code,
+    stock_data,
+    forecast_data,
+    predicted_prices,
+    time_step,
+):
+    """
+    Save an actual-versus-predicted stock-price figure.
+
+    The complete 254-day observed series is shown together with the
+    50 recursive predictions aligned to the held-out forecast dates.
+
+    Parameters
+    ----------
+    stock_code : str
+        Stock ticker.
+
+    stock_data : pandas.DataFrame
+        Complete 254-day chronological dataset.
+
+    forecast_data : pandas.DataFrame
+        Final 50 held-out observations.
+
+    predicted_prices : numpy.ndarray
+        Final predictions in Australian dollars.
+
+    time_step : int
+        LSTM sequence length.
+
+    Returns
+    -------
+    pathlib.Path
+        Saved forecast-plot path.
+    """
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    figure = plt.figure(
+        figsize=(12, 7)
+    )
+
+    plt.plot(
+        stock_data[DATE_COLUMN],
+        stock_data[CLOSE_COLUMN],
+        label="Actual Closing Price",
+    )
+
+    plt.plot(
+        forecast_data[DATE_COLUMN],
+        predicted_prices,
+        label="Predicted Closing Price",
+    )
+
+    forecast_start_date = (
+        forecast_data[
+            DATE_COLUMN
+        ].iloc[0]
+    )
+
+    plt.axvline(
+        forecast_start_date,
+        linestyle="--",
+        label="Forecast Start",
+    )
+
+    plt.title(
+        f"{stock_code} Stock Price Forecast "
+        f"(Time Step {time_step})"
+    )
+
+    plt.xlabel(
+        "Date"
+    )
+
+    plt.ylabel(
+        "Closing Price ($)"
+    )
+
+    plt.legend()
+
+    plt.grid(
+        alpha=0.3
+    )
+
+    figure.autofmt_xdate()
+
+    plt.tight_layout()
+
+    output_path = (
+        OUTPUT_DIR
+        / f"lstm_{stock_code}_t{time_step}_forecast.png"
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(
+        figure
+    )
+
+    print(
+        f"Forecast plot saved to: "
+        f"{output_path}"
+    )
+
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# 17. Final Selected LSTM Training and Forecasting
+# ---------------------------------------------------------------------------
+
+def run_final_lstm_forecast(
+    stock_code,
+    datasets,
+    time_step,
+):
+    """
+    Train the selected model and forecast the final 50 trading days.
+
+    Model selection has already been completed using chronological
+    validation results from the parameter-tuning stage.
+
+    Two training stages are used here:
+
+    1. A chronological training/validation run is repeated to generate
+       the required training and validation loss curves.
+    2. A fresh model is then trained using all historical sequences from
+       the first 204 observations before the final recursive forecast.
+
+    The final 50 held-out closing prices are used only after forecasting
+    to calculate the final test RMSE.
+
+    Parameters
+    ----------
+    stock_code : str
+        Stock ticker.
+
+    datasets : dict
+        Complete, historical training, and held-out forecast datasets.
+
+    time_step : int
+        LSTM sequence length.
+
+    Returns
+    -------
+    dict
+        Final model settings and 50-day forecast results.
+    """
+
+    configuration_name = (
+        SELECTED_LSTM_CONFIGURATIONS[
+            (
+                stock_code,
+                time_step,
+            )
+        ]
+    )
+
+    configuration = get_lstm_configuration(
+        configuration_name
+    )
+
+    training_data = datasets[
+        "training"
+    ]
+
+    forecast_data = datasets[
+        "forecast"
+    ]
+
+    stock_data = datasets[
+        "all"
+    ]
+
+    prepared_data = prepare_lstm_data(
+        training_data,
+        forecast_data,
+        time_step,
+    )
+
+    scaler = prepared_data[
+        "scaler"
+    ]
+
+    X_all = prepared_data[
+        "X_train"
+    ]
+
+    y_all = prepared_data[
+        "y_train"
+    ]
+
+    (
+        X_train,
+        X_validation,
+        y_train,
+        y_validation,
+    ) = split_lstm_sequences(
+        X_all,
+        y_all,
+    )
+
+    print("\n" + "=" * 70)
+
+    print(
+        f"Final LSTM Forecast: "
+        f"{stock_code} | Time Step {time_step}"
+    )
+
+    print("=" * 70)
+
+    print(
+        f"Configuration: "
+        f"{configuration_name}"
+    )
+
+    print(
+        f"LSTM units: "
+        f"{configuration['lstm_units']}"
+    )
+
+    print(
+        f"Epochs: "
+        f"{configuration['epochs']}"
+    )
+
+    print(
+        f"Batch size: "
+        f"{configuration['batch_size']}"
+    )
+
+    print(
+        f"Learning rate: "
+        f"{configuration['learning_rate']}"
+    )
+
+    print(
+        f"Historical sequences: "
+        f"{len(X_all)}"
+    )
+
+    # ---------------------------------------------------------------
+    # Stage 1: chronological train/validation evidence
+    # ---------------------------------------------------------------
+
+    tf.keras.backend.clear_session()
+
+    tf.keras.utils.set_random_seed(
+        RANDOM_SEED
+    )
+
+    validation_model = build_lstm_model(
+        time_step=time_step,
+        lstm_units=configuration[
+            "lstm_units"
+        ],
+    )
+
+    validation_model = compile_lstm_model(
+        validation_model,
+        learning_rate=configuration[
+            "learning_rate"
+        ],
+    )
+
+    validation_history = validation_model.fit(
+        X_train,
+        y_train,
+        validation_data=(
+            X_validation,
+            y_validation,
+        ),
+        epochs=configuration[
+            "epochs"
+        ],
+        batch_size=configuration[
+            "batch_size"
+        ],
+        shuffle=False,
+        verbose=0,
+    )
+
+    save_lstm_loss_plot(
+        validation_history,
+        stock_code,
+        time_step,
+    )
+
+    # ---------------------------------------------------------------
+    # Stage 2: train final model on all historical sequences
+    # ---------------------------------------------------------------
+
+    tf.keras.backend.clear_session()
+
+    tf.keras.utils.set_random_seed(
+        RANDOM_SEED
+    )
+
+    final_model = build_lstm_model(
+        time_step=time_step,
+        lstm_units=configuration[
+            "lstm_units"
+        ],
+    )
+
+    final_model = compile_lstm_model(
+        final_model,
+        learning_rate=configuration[
+            "learning_rate"
+        ],
+    )
+
+    print(
+        f"Training final model using "
+        f"{len(X_all)} historical sequences..."
+    )
+
+    training_start = perf_counter()
+
+    final_model.fit(
+        X_all,
+        y_all,
+        epochs=configuration[
+            "epochs"
+        ],
+        batch_size=configuration[
+            "batch_size"
+        ],
+        shuffle=False,
+        verbose=0,
+    )
+
+    training_seconds = (
+        perf_counter()
+        - training_start
+    )
+
+    # ---------------------------------------------------------------
+    # Stage 3: recursive forecasting
+    # ---------------------------------------------------------------
+
+    predictions_scaled = recursive_stock_forecast(
+        final_model,
+        prepared_data[
+            "scaled_training"
+        ],
+        time_step=time_step,
+        forecast_days=FORECAST_DAYS,
+    )
+
+    predicted_prices = (
+        scaler.inverse_transform(
+            predictions_scaled
+        )
+        .reshape(-1)
+    )
+
+    actual_prices = (
+        forecast_data[
+            CLOSE_COLUMN
+        ]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    forecast_rmse = calculate_rmse(
+        actual_prices,
+        predicted_prices,
+    )
+
+    print(
+        f"Final 50-day forecast RMSE: "
+        f"${forecast_rmse:.4f}"
+    )
+
+    # ---------------------------------------------------------------
+    # Save prediction table
+    # ---------------------------------------------------------------
+
+    absolute_errors = np.abs(
+        actual_prices
+        - predicted_prices
+    )
+
+    forecast_results = pd.DataFrame(
+        {
+            "date": (
+                forecast_data[
+                    DATE_COLUMN
+                ]
+                .dt.strftime(
+                    "%d/%m/%Y"
+                )
+                .to_numpy()
+            ),
+            "actual_close": np.round(
+                actual_prices,
+                4,
+            ),
+            "predicted_close": np.round(
+                predicted_prices,
+                4,
+            ),
+            "absolute_error": np.round(
+                absolute_errors,
+                4,
+            ),
+        }
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    forecast_csv_path = (
+        OUTPUT_DIR
+        / (
+            f"lstm_{stock_code}_"
+            f"t{time_step}_forecast.csv"
+        )
+    )
+
+    forecast_results.to_csv(
+        forecast_csv_path,
+        index=False,
+    )
+
+    print(
+        f"Forecast data saved to: "
+        f"{forecast_csv_path}"
+    )
+
+    # ---------------------------------------------------------------
+    # Save final figures and model
+    # ---------------------------------------------------------------
+
+    save_stock_forecast_plot(
+        stock_code,
+        stock_data,
+        forecast_data,
+        predicted_prices,
+        time_step,
+    )
+
+    model_path = (
+        OUTPUT_DIR
+        / (
+            f"lstm_{stock_code}_"
+            f"t{time_step}.keras"
+        )
+    )
+
+    final_model.save(
+        model_path
+    )
+
+    print(
+        f"Final model saved to: "
+        f"{model_path}"
+    )
+
+    return {
+        "stock": stock_code,
+        "stock_name": STOCK_NAMES[
+            stock_code
+        ],
+        "time_step": time_step,
+        "configuration": configuration_name,
+        "lstm_units": configuration[
+            "lstm_units"
+        ],
+        "epochs": configuration[
+            "epochs"
+        ],
+        "batch_size": configuration[
+            "batch_size"
+        ],
+        "learning_rate": configuration[
+            "learning_rate"
+        ],
+        "parameters": final_model.count_params(),
+        "historical_sequences": len(
+            X_all
+        ),
+        "forecast_days": FORECAST_DAYS,
+        "forecast_rmse_dollars": round(
+            forecast_rmse,
+            4,
+        ),
+        "mean_absolute_error_dollars": round(
+            float(
+                np.mean(
+                    absolute_errors
+                )
+            ),
+            4,
+        ),
+        "training_seconds": round(
+            training_seconds,
+            2,
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 18. Final Forecast Runner
+# ---------------------------------------------------------------------------
+
+def run_all_final_lstm_forecasts(
+    stock_datasets,
+):
+    """
+    Run all six selected stock/time-step final forecasts.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Final comparison results.
+    """
+
+    final_results = []
+
+    total_runs = (
+        len(STOCK_FILES)
+        * len(TIME_STEPS)
+    )
+
+    current_run = 0
+
+    print("\nFinal LSTM 50-Day Forecasts")
+    print("===========================")
+
+    print(
+        f"Total final models: "
+        f"{total_runs}"
+    )
+
+    for stock_code, datasets in stock_datasets.items():
+
+        for time_step in TIME_STEPS:
+
+            current_run += 1
+
+            print(
+                f"\nFinal forecast "
+                f"{current_run}/{total_runs}"
+            )
+
+            result = run_final_lstm_forecast(
+                stock_code=stock_code,
+                datasets=datasets,
+                time_step=time_step,
+            )
+
+            final_results.append(
+                result
+            )
+
+    results_table = pd.DataFrame(
+        final_results
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / "lstm_final_forecast_results.csv"
+    )
+
+    results_table.to_csv(
+        output_path,
+        index=False,
+    )
+
+    print("\nFinal LSTM Forecast Results")
+    print("===========================")
+
+    print(
+        results_table.to_string(
+            index=False
+        )
+    )
+
+    print(
+        f"\nFinal comparison saved to: "
+        f"{output_path}"
+    )
+
+    return results_table
+
+
+# ---------------------------------------------------------------------------
+# 19. LSTM Data Preparation Summary
 # ---------------------------------------------------------------------------
 
 def display_lstm_preparation_summary(
@@ -1528,7 +2386,7 @@ def display_lstm_preparation_summary(
 
 
 # ---------------------------------------------------------------------------
-# 15. Dataset Summary
+# 20. Dataset Summary
 # ---------------------------------------------------------------------------
 
 def display_stock_summary(
@@ -1650,7 +2508,7 @@ def display_stock_summary(
 
 
 # ---------------------------------------------------------------------------
-# 16. Assigned Mining Group Loader
+# 21. Assigned Mining Group Loader
 # ---------------------------------------------------------------------------
 
 def load_assigned_stocks():
@@ -1688,12 +2546,16 @@ def load_assigned_stocks():
 
 
 # ---------------------------------------------------------------------------
-# 17. Main Program
+# 22. Main Program
 # ---------------------------------------------------------------------------
 
 def main():
     """
-    Run the current Task 2.2 LSTM parameter-tuning pipeline.
+    Run the current Task 2.2 final forecasting pipeline.
+
+    The parameter-tuning stage has already been completed. This execution
+    validates preprocessing and then runs only the six selected final
+    stock/time-step models against the held-out 50-day forecast period.
     """
 
     print(
@@ -1805,13 +2667,25 @@ def main():
     # ------------------------------------------------------------------
     # Parameter experiments
     # ------------------------------------------------------------------
+    #
+    # The 36 parameter experiments have already been completed and their
+    # results were used to populate SELECTED_LSTM_CONFIGURATIONS.
+    # Uncomment only when the full tuning experiment needs to be repeated.
+    #
+    # experiment_results = run_lstm_parameter_experiments(
+    #     stock_datasets
+    # )
+    #
+    # display_best_lstm_configurations(
+    #     experiment_results
+    # )
 
-    experiment_results = run_lstm_parameter_experiments(
+    # ------------------------------------------------------------------
+    # Final selected models and 50-day recursive forecasts
+    # ------------------------------------------------------------------
+
+    run_all_final_lstm_forecasts(
         stock_datasets
-    )
-
-    display_best_lstm_configurations(
-        experiment_results
     )
 
 
