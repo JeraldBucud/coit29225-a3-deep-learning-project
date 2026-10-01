@@ -1694,10 +1694,11 @@ def save_stock_forecast_plot(
     time_step,
 ):
     """
-    Save an actual-versus-predicted stock-price figure.
+    Plot the observed stock-price data and the final 50-day forecast.
 
-    The complete 254-day observed series is shown together with the
-    50 recursive predictions aligned to the held-out forecast dates.
+    Both individual data points and fitted curves are displayed to satisfy
+    the assessment requirement for original-versus-predicted stock-price
+    visualisation.
 
     Parameters
     ----------
@@ -1705,21 +1706,16 @@ def save_stock_forecast_plot(
         Stock ticker.
 
     stock_data : pandas.DataFrame
-        Complete 254-day chronological dataset.
+        Complete 254-day chronological stock dataset.
 
     forecast_data : pandas.DataFrame
         Final 50 held-out observations.
 
     predicted_prices : numpy.ndarray
-        Final predictions in Australian dollars.
+        Predicted prices for the final 50 trading days.
 
     time_step : int
-        LSTM sequence length.
-
-    Returns
-    -------
-    pathlib.Path
-        Saved forecast-plot path.
+        LSTM time-step setting.
     """
 
     OUTPUT_DIR.mkdir(
@@ -1731,17 +1727,47 @@ def save_stock_forecast_plot(
         figsize=(12, 7)
     )
 
+    # ---------------------------------------------------------------
+    # Complete observed stock-price series
+    # ---------------------------------------------------------------
+
     plt.plot(
         stock_data[DATE_COLUMN],
         stock_data[CLOSE_COLUMN],
         label="Actual Closing Price",
+        linewidth=1.5,
     )
+
+    # Display the individual observed data points.
+    plt.scatter(
+        stock_data[DATE_COLUMN],
+        stock_data[CLOSE_COLUMN],
+        s=12,
+        label="Actual Data Points",
+    )
+
+    # ---------------------------------------------------------------
+    # Final 50-day predicted series
+    # ---------------------------------------------------------------
 
     plt.plot(
         forecast_data[DATE_COLUMN],
         predicted_prices,
         label="Predicted Closing Price",
+        linewidth=2.0,
     )
+
+    # Display individual predicted values.
+    plt.scatter(
+        forecast_data[DATE_COLUMN],
+        predicted_prices,
+        s=20,
+        label="Predicted Data Points",
+    )
+
+    # ---------------------------------------------------------------
+    # Mark where forecasting begins
+    # ---------------------------------------------------------------
 
     forecast_start_date = (
         forecast_data[
@@ -2545,36 +2571,189 @@ def load_assigned_stocks():
     return stock_datasets
 
 
+
 # ---------------------------------------------------------------------------
-# 22. Main Program
+# Assessment Menu
+# ---------------------------------------------------------------------------
+
+def display_lstm_menu():
+    """Display the Task 2.2 menu required by the assessment."""
+
+    print(
+        "\nCOIT29225 Assessment 3 - LSTM Stock Forecasting"
+    )
+
+    print(
+        "================================================"
+    )
+
+    print(
+        "1. Time step = 5"
+    )
+
+    print(
+        "2. Time step = 10"
+    )
+
+    print(
+        "3. Quit"
+    )
+
+
+def run_forecasts_for_time_step(
+    stock_datasets,
+    time_step,
+):
+    """
+    Run final forecasts for all three assigned stocks using one time step.
+
+    Parameters
+    ----------
+    stock_datasets : dict
+        Loaded RIO, BHP, and FMG datasets.
+
+    time_step : int
+        Assessment time step, either 5 or 10.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Final results for the three stock forecasts.
+    """
+
+    results = []
+
+    print(
+        f"\nRunning final LSTM forecasts "
+        f"with time step {time_step}"
+    )
+
+    print(
+        "=" * 55
+    )
+
+    for stock_code, datasets in stock_datasets.items():
+
+        result = run_final_lstm_forecast(
+            stock_code,
+            datasets,
+            time_step,
+        )
+
+        results.append(
+            result
+        )
+
+    results_table = pd.DataFrame(
+        results
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_path = (
+        OUTPUT_DIR
+        / f"lstm_t{time_step}_final_results.csv"
+    )
+
+    results_table.to_csv(
+        output_path,
+        index=False,
+    )
+
+    print(
+        f"\nTime Step {time_step} Forecast Results"
+    )
+
+    print(
+        "=" * 40
+    )
+
+    print(
+        results_table[
+            [
+                "stock",
+                "configuration",
+                "lstm_units",
+                "epochs",
+                "forecast_rmse_dollars",
+                "mean_absolute_error_dollars",
+            ]
+        ].to_string(
+            index=False
+        )
+    )
+
+    print(
+        f"\nResults saved to: "
+        f"{output_path}"
+    )
+
+    return results_table
+
+
+def run_lstm_menu(
+    stock_datasets,
+):
+    """
+    Run the assessment-required Task 2.2 menu.
+    """
+
+    while True:
+
+        display_lstm_menu()
+
+        choice = input(
+            "\nSelect an option (1-3): "
+        ).strip()
+
+        if choice == "1":
+
+            run_forecasts_for_time_step(
+                stock_datasets,
+                time_step=5,
+            )
+
+        elif choice == "2":
+
+            run_forecasts_for_time_step(
+                stock_datasets,
+                time_step=10,
+            )
+
+        elif choice == "3":
+
+            print(
+                "\nExiting application."
+            )
+
+            break
+
+        else:
+
+            print(
+                "\nInvalid selection. "
+                "Please enter 1, 2, or 3."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Main Program
 # ---------------------------------------------------------------------------
 
 def main():
     """
-    Run the current Task 2.2 final forecasting pipeline.
-
-    The parameter-tuning stage has already been completed. This execution
-    validates preprocessing and then runs only the six selected final
-    stock/time-step models against the held-out 50-day forecast period.
+    Load the assigned stock datasets and launch the Task 2.2 menu.
     """
 
     print(
-        "\nCOIT29225 Assessment 3 - Task 2.2"
-    )
-
-    print(
-        "Australian Stock Price Forecasting"
-    )
-
-    print(
-        "Assigned Group: Mining"
-    )
-
-    print(
-        "Stocks: RIO, BHP, FMG"
+        "\nLoading assigned mining stock datasets..."
     )
 
     try:
+
         stock_datasets = load_assigned_stocks()
 
     except (
@@ -2589,102 +2768,23 @@ def main():
 
         return
 
-    # ------------------------------------------------------------------
-    # Dataset summaries
-    # ------------------------------------------------------------------
-
-    for stock_code, datasets in stock_datasets.items():
-
-        display_stock_summary(
-            stock_code,
-            datasets["all"],
-            datasets["training"],
-            datasets["forecast"],
-        )
-
     print(
-        "\nAll assigned stock datasets "
-        "were loaded successfully."
+        f"Loaded {len(stock_datasets)} stocks successfully."
     )
 
     print(
-        "Chronological preprocessing "
-        "and 204/50 splitting complete."
-    )
-
-    # ------------------------------------------------------------------
-    # Verify sequence preparation for both assessment time steps
-    # ------------------------------------------------------------------
-
-    print(
-        "\nLSTM Sequence Preparation"
+        "Stocks: RIO, BHP, FMG"
     )
 
     print(
-        "========================="
+        "Historical period: 204 trading days"
     )
-
-    for stock_code, datasets in stock_datasets.items():
-
-        for time_step in TIME_STEPS:
-
-            prepared_data = prepare_lstm_data(
-                datasets["training"],
-                datasets["forecast"],
-                time_step,
-            )
-
-            display_lstm_preparation_summary(
-                stock_code,
-                datasets["training"],
-                prepared_data,
-                time_step,
-            )
 
     print(
-        "\nLSTM scaling and sequence "
-        "preparation complete."
+        "Forecast/testing period: 50 trading days"
     )
 
-    # ------------------------------------------------------------------
-    # Development smoke test
-    # ------------------------------------------------------------------
-    #
-    # The smoke test has already been completed successfully.
-    # Uncomment only if the basic training pipeline needs to be retested.
-    #
-    # run_lstm_smoke_test(
-    #     stock_code="RIO",
-    #     training_data=stock_datasets[
-    #         "RIO"
-    #     ]["training"],
-    #     forecast_data=stock_datasets[
-    #         "RIO"
-    #     ]["forecast"],
-    #     time_step=5,
-    # )
-
-    # ------------------------------------------------------------------
-    # Parameter experiments
-    # ------------------------------------------------------------------
-    #
-    # The 36 parameter experiments have already been completed and their
-    # results were used to populate SELECTED_LSTM_CONFIGURATIONS.
-    # Uncomment only when the full tuning experiment needs to be repeated.
-    #
-    # experiment_results = run_lstm_parameter_experiments(
-    #     stock_datasets
-    # )
-    #
-    # display_best_lstm_configurations(
-    #     experiment_results
-    # )
-
-    # ------------------------------------------------------------------
-    # Final selected models and 50-day recursive forecasts
-    # ------------------------------------------------------------------
-
-    run_all_final_lstm_forecasts(
+    run_lstm_menu(
         stock_datasets
     )
 
