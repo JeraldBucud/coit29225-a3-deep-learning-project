@@ -102,7 +102,7 @@ Performance will be evaluated using Root Mean Squared Error (RMSE), training and
 - Matplotlib
 - scikit-learn
 
-Additional dependencies will be added as the project develops.
+Project dependencies are listed in `requirements.txt`.
 
 ## Project Status
 
@@ -130,4 +130,28 @@ Completed features include:
 
 ### Task 2.2 - LSTM Stock Price Forecasting
 
-Not yet implemented.
+Implementation complete.
+
+Completed features include:
+
+- Mining-group stock datasets: RIO, BHP, and FMG
+- Chronological stock-price preprocessing
+- 204-day historical training period
+- 50-day forecasting/testing period
+- Training-only MinMax scaling
+- LSTM sequence generation for time steps 5 and 10
+- Chronological training and validation split
+- TensorFlow/Keras LSTM regression model
+- Six controlled neuron and epoch configurations
+- Parameter tuning using validation RMSE
+- Selected optimal configuration for each stock and time step
+- Recursive 50-day stock-price forecasting
+- RMSE and MAE evaluation in Australian dollars
+- Training and validation loss curves
+- Actual and predicted stock-price curves
+- Actual and predicted data-point visualisation
+- Forecast result CSV files
+- Assessment-required menu:
+  - Time step = 5
+  - Time step = 10
+  - Quit
