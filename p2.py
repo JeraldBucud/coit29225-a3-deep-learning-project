@@ -36,12 +36,19 @@ The program currently performs the following stages:
 16. Recursively forecasts the final 50 trading days.
 17. Calculates final forecast RMSE in Australian dollars.
 18. Saves final prediction tables, loss curves, forecast plots, and models.
+19. Saves the full 36-run tuning histories plus a source/data manifest.
+20. Validates tuning provenance before reusing cached model selections.
 
 The completed application includes the assessment-required interactive
 menu for running the final forecasts using time steps 5 and 10.
 """
 
 from pathlib import Path
+import sys
+import hashlib
+import json
+import platform
+from datetime import datetime, timezone
 from time import perf_counter
 
 import matplotlib.pyplot as plt
@@ -55,11 +62,13 @@ from sklearn.preprocessing import MinMaxScaler
 # 1. Configuration
 # ---------------------------------------------------------------------------
 
-# Directory containing the supplied Assessment 3 stock-price CSV files.
-DATA_DIR = Path("data")
-
-# Directory used for generated experiment outputs.
-OUTPUT_DIR = Path("outputs")
+# Resolve input and output folders from this script's directory.
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / "data"
+OUTPUT_DIR = PROJECT_DIR / "outputs" / "p2"
+TUNING_DIR = OUTPUT_DIR / "tuning"
+TUNING_HISTORY_DIR = TUNING_DIR / "histories"
+TUNING_MANIFEST = TUNING_DIR / "lstm_tuning_manifest.json"
 
 # The student's ID ends in an odd digit, so the mining group is required.
 STOCK_FILES = {
@@ -166,20 +175,112 @@ LSTM_CONFIGURATIONS = [
 
 
 
+# Corrected model choices are read from the new 36-run experiment results.
+# Previous selections used a scaler fitted to the full 204-day history
+# during tuning and must NOT silently be reused after correcting that leak.
+
 # ---------------------------------------------------------------------------
-# Selected LSTM Configurations
+# 1a. Reproducibility and tuning provenance
 # ---------------------------------------------------------------------------
 
-# These configurations produced the lowest chronological validation RMSE
-# during the completed 36-run parameter experiment.
-SELECTED_LSTM_CONFIGURATIONS = {
-    ("RIO", 5): "C_32_units_20_epochs",
-    ("RIO", 10): "A_16_units_20_epochs",
-    ("BHP", 5): "F_64_units_50_epochs",
-    ("BHP", 10): "D_32_units_50_epochs",
-    ("FMG", 5): "F_64_units_50_epochs",
-    ("FMG", 10): "F_64_units_50_epochs",
-}
+def sha256_file(path):
+    """Return the SHA-256 digest of a source or input data file."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def current_tuning_identity():
+    """Fingerprint the exact Python source and three dataset files in use."""
+    return {
+        "source_sha256": sha256_file(Path(__file__).resolve()),
+        "data_sha256": {
+            stock: sha256_file(path) for stock, path in STOCK_FILES.items()
+        },
+    }
+
+
+def utc_now_string():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def save_tuning_manifest(manifest):
+    """Safely write the manifest so a partial file is not mistaken for valid."""
+    TUNING_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = TUNING_MANIFEST.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    temporary.replace(TUNING_MANIFEST)
+
+
+def read_tuning_manifest():
+    if not TUNING_MANIFEST.is_file():
+        return None
+    try:
+        return json.loads(TUNING_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def tuning_identity_matches(manifest):
+    if not isinstance(manifest, dict) or manifest.get("manifest_version") != 1:
+        return False
+    current = current_tuning_identity()
+    return (
+        manifest.get("source_sha256") == current["source_sha256"]
+        and manifest.get("data_sha256") == current["data_sha256"]
+        and manifest.get("random_seed") == RANDOM_SEED
+        and manifest.get("training_days") == TRAINING_DAYS
+        and manifest.get("forecast_days") == FORECAST_DAYS
+        and manifest.get("validation_fraction") == VALIDATION_FRACTION
+        and manifest.get("time_steps") == list(TIME_STEPS)
+        and manifest.get("configurations") == LSTM_CONFIGURATIONS
+    )
+
+
+def new_tuning_manifest():
+    identity = current_tuning_identity()
+    return {
+        "manifest_version": 1,
+        "status": "in_progress",
+        "started_at_utc": utc_now_string(),
+        **identity,
+        "python_version": platform.python_version(),
+        "tensorflow_version": tf.__version__,
+        "pandas_version": pd.__version__,
+        "numpy_version": np.__version__,
+        "sklearn_version": __import__("sklearn").__version__,
+        "random_seed": RANDOM_SEED,
+        "training_days": TRAINING_DAYS,
+        "forecast_days": FORECAST_DAYS,
+        "validation_fraction": VALIDATION_FRACTION,
+        "time_steps": list(TIME_STEPS),
+        "stocks": list(STOCK_FILES),
+        "configurations": LSTM_CONFIGURATIONS,
+        "expected_experiments": len(STOCK_FILES) * len(TIME_STEPS) * len(LSTM_CONFIGURATIONS),
+        "completed_experiments": [],
+    }
+
+
+def tuning_history_path(stock_code, time_step, config_name):
+    return TUNING_HISTORY_DIR / f"lstm_{stock_code}_t{time_step}_{config_name}_history.csv"
+
+
+def save_tuning_experiment_history(history, stock_code, time_step, config_name):
+    """Persist train/validation metrics for each of the 36 tuning trials."""
+    columns = history.history
+    required = ("loss", "val_loss", "rmse", "val_rmse")
+    missing = [name for name in required if name not in columns]
+    if missing:
+        raise KeyError(f"Missing experiment history metrics: {missing}")
+    TUNING_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    result = pd.DataFrame({"epoch": range(1, len(columns["loss"]) + 1)})
+    for metric in required:
+        result[metric] = columns[metric]
+    path = tuning_history_path(stock_code, time_step, config_name)
+    result.to_csv(path, index=False)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +662,46 @@ def prepare_lstm_data(
 
 
 # ---------------------------------------------------------------------------
+# 5a. Leakage-Free Historical Parameter-Tuning Preparation
+# ---------------------------------------------------------------------------
+
+def prepare_tuning_lstm_data(training_data, time_step):
+    """Fit a scaler using only prices available before validation begins.
+
+    The final 50 trading days are excluded from tuning entirely. For each
+    time step, the training/validation boundary is determined from the
+    number of historical target sequences; the scaler sees only days up to
+    the final training target. Validation input windows can use earlier
+    training prices, which are genuinely available at forecast time.
+    """
+    prices = training_data[[CLOSE_COLUMN]].to_numpy(dtype=np.float32)
+    num_sequences = len(prices) - time_step
+    if num_sequences < 2:
+        raise ValueError("Insufficient historical prices for tuning")
+    split_index = int(num_sequences * (1 - VALIDATION_FRACTION))
+    if not 0 < split_index < num_sequences:
+        raise ValueError("Empty tuning training or validation subset")
+    first_validation_target = time_step + split_index
+
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(prices[:first_validation_target])
+    scaled_prices = scaler.transform(prices)
+    X, y = create_lstm_sequences(scaled_prices, time_step)
+    X_train, X_validation, y_train, y_validation = split_lstm_sequences(
+        X, y, validation_fraction=VALIDATION_FRACTION
+    )
+    return {
+        "scaler": scaler,
+        "X_train": X_train,
+        "X_validation": X_validation,
+        "y_train": y_train,
+        "y_validation": y_validation,
+        "scaler_fit_days": first_validation_target,
+        "scaler_fit_scope": "tuning_train_only",
+    }
+
+
+# ---------------------------------------------------------------------------
 # 6. Chronological Training and Validation Split
 # ---------------------------------------------------------------------------
 
@@ -782,21 +923,11 @@ def run_lstm_smoke_test(
         Trained smoke-test model and Keras History object.
     """
 
-    prepared_data = prepare_lstm_data(
-        training_data,
-        forecast_data,
-        time_step,
-    )
-
-    (
-        X_train,
-        X_validation,
-        y_train,
-        y_validation,
-    ) = split_lstm_sequences(
-        prepared_data["X_train"],
-        prepared_data["y_train"],
-    )
+    prepared_data = prepare_tuning_lstm_data(training_data, time_step)
+    X_train = prepared_data["X_train"]
+    X_validation = prepared_data["X_validation"]
+    y_train = prepared_data["y_train"]
+    y_validation = prepared_data["y_validation"]
 
     print("\nLSTM Smoke Test")
     print("===============")
@@ -986,21 +1117,11 @@ def run_single_lstm_experiment(
         Experiment settings and measured results.
     """
 
-    prepared_data = prepare_lstm_data(
-        training_data,
-        forecast_data,
-        time_step,
-    )
-
-    (
-        X_train,
-        X_validation,
-        y_train,
-        y_validation,
-    ) = split_lstm_sequences(
-        prepared_data["X_train"],
-        prepared_data["y_train"],
-    )
+    prepared_data = prepare_tuning_lstm_data(training_data, time_step)
+    X_train = prepared_data["X_train"]
+    X_validation = prepared_data["X_validation"]
+    y_train = prepared_data["y_train"]
+    y_validation = prepared_data["y_validation"]
 
     scaler = prepared_data[
         "scaler"
@@ -1088,6 +1209,10 @@ def run_single_lstm_experiment(
         - start_time
     )
 
+    history_path = save_tuning_experiment_history(
+        history, stock_code, time_step, configuration["name"]
+    )
+
     # Generate predictions for historical training and validation sequences.
     training_predictions_scaled = model.predict(
         X_train,
@@ -1155,6 +1280,9 @@ def run_single_lstm_experiment(
             "learning_rate"
         ],
         "parameters": model.count_params(),
+        "tuning_history_file": str(history_path.relative_to(OUTPUT_DIR)),
+        "scaler_fit_scope": prepared_data["scaler_fit_scope"],
+        "scaler_fit_days": prepared_data["scaler_fit_days"],
         "training_sequences": len(
             X_train
         ),
@@ -1271,7 +1399,38 @@ def run_lstm_parameter_experiments(
         Results for all 36 controlled experiments.
     """
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    TUNING_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    progress_path = OUTPUT_DIR / "lstm_parameter_experiment_progress.csv"
+
+    # Resume a partial run only when its recorded source, data, and
+    # configurations exactly match the ones currently loaded.
+    previous_manifest = read_tuning_manifest()
+    manifest = previous_manifest if tuning_identity_matches(previous_manifest) else new_tuning_manifest()
     results = []
+    if progress_path.is_file() and tuning_identity_matches(previous_manifest):
+        saved = pd.read_csv(progress_path)
+        needed = {"stock", "time_step", "configuration", "scaler_fit_scope", "tuning_history_file"}
+        if needed.issubset(saved.columns) and saved["scaler_fit_scope"].eq("tuning_train_only").all():
+            for row in saved.to_dict(orient="records"):
+                h = OUTPUT_DIR / row["tuning_history_file"]
+                if h.is_file():
+                    results.append(row)
+            print(f"Resuming {len(results)} completed experiments with verified history files")
+    elif progress_path.is_file():
+        print("Prior partial results do not match current source/data; restarting tuning")
+
+    # If --tune is explicitly run after an earlier complete session,
+    # the absence of a progress CSV triggers a fresh 36-run experiment.
+    if not results:
+        manifest = new_tuning_manifest()
+    manifest["status"] = "in_progress"
+    save_tuning_manifest(manifest)
+
+    completed = {
+        (r["stock"], int(r["time_step"]), r["configuration"])
+        for r in results
+    }
 
     total_runs = (
         len(STOCK_FILES)
@@ -1317,6 +1476,11 @@ def run_lstm_parameter_experiments(
                     f"{current_run}/{total_runs}"
                 )
 
+                experiment_key = (stock_code, time_step, configuration["name"])
+                if experiment_key in completed:
+                    print("Already completed; using saved result")
+                    continue
+
                 result = run_single_lstm_experiment(
                     stock_code=stock_code,
                     training_data=datasets[
@@ -1332,10 +1496,20 @@ def run_lstm_parameter_experiments(
                 results.append(
                     result
                 )
+                completed.add(experiment_key)
+                # Preserve completed trials and their settings after every run.
+                pd.DataFrame(results).to_csv(progress_path, index=False)
+                manifest["completed_experiments"] = [
+                    f"{r['stock']}:t{int(r['time_step'])}:{r['configuration']}"
+                    for r in results
+                ]
+                save_tuning_manifest(manifest)
 
-    results_table = pd.DataFrame(
-        results
-    )
+    results_table = pd.DataFrame(results)
+    if len(results_table) != total_runs:
+        raise RuntimeError(
+            f"Expected {total_runs} distinct tuning runs, found {len(results_table)}"
+        )
 
     OUTPUT_DIR.mkdir(
         parents=True,
@@ -1351,6 +1525,15 @@ def run_lstm_parameter_experiments(
         output_path,
         index=False,
     )
+    manifest["status"] = "completed"
+    manifest["completed_at_utc"] = utc_now_string()
+    manifest["completed_experiments"] = [
+        f"{r['stock']}:t{int(r['time_step'])}:{r['configuration']}"
+        for r in results
+    ]
+    save_tuning_manifest(manifest)
+    if progress_path.exists():
+        progress_path.unlink()
 
     print("\nLSTM Parameter Experiment Results")
     print("=================================")
@@ -1456,6 +1639,74 @@ def display_best_lstm_configurations(
 
 
 # ---------------------------------------------------------------------------
+# 13a. Choose Models from Corrected Tuning Results
+# ---------------------------------------------------------------------------
+
+def select_corrected_lstm_configurations(stock_datasets=None):
+    """Load the corrected 36-run results, tuning if none have been saved.
+
+    Refuse to reuse the older CSV (which did not track scaler scope).
+    On a first menu run, tuning occurs once for all stocks/time steps.
+    """
+    path = OUTPUT_DIR / "lstm_parameter_experiment_results.csv"
+    if path.is_file():
+        results = pd.read_csv(path)
+    else:
+        results = None
+    required = {
+        (stock_code, time_step)
+        for stock_code in STOCK_FILES for time_step in TIME_STEPS
+    }
+
+    def compatible(table):
+        if table is None or not {
+            "stock", "time_step", "configuration", "validation_rmse_dollars",
+            "scaler_fit_scope", "scaler_fit_days",
+        }.issubset(table.columns):
+            return False
+        if len(table) != len(required) * len(LSTM_CONFIGURATIONS):
+            return False
+        if not table["scaler_fit_scope"].eq("tuning_train_only").all():
+            return False
+        for stock, step in required:
+            subset = table[(table["stock"] == stock) & (table["time_step"] == step)]
+            if set(subset["configuration"]) != {c["name"] for c in LSTM_CONFIGURATIONS}:
+                return False
+            if len(subset) != len(LSTM_CONFIGURATIONS):
+                return False
+        return table["validation_rmse_dollars"].notna().all()
+
+    manifest = read_tuning_manifest()
+    if not tuning_identity_matches(manifest) or manifest.get("status") != "completed":
+        print("Tuning manifest absent, incomplete, or from a different source/dataset")
+        results = None
+    elif results is not None and "tuning_history_file" not in results.columns:
+        results = None
+    elif results is not None and not all(
+        (OUTPUT_DIR / str(filename)).is_file() for filename in results["tuning_history_file"]
+    ):
+        print("Tuning histories missing; rebuilding experiment results")
+        results = None
+
+    if not compatible(results):
+        if stock_datasets is None:
+            raise RuntimeError("Corrected tuning results absent; provide stock datasets")
+        print("\nCorrected LSTM parameter results not found.")
+        print("Running the 36 required configurations with training-only scaling.")
+        print("This may take considerable time; results will be saved for reuse.")
+        results = run_lstm_parameter_experiments(stock_datasets)
+        if not compatible(results):
+            raise RuntimeError("New tuning results failed completeness validation")
+
+    selections = {}
+    for stock, step in sorted(required):
+        subset = results[(results["stock"] == stock) & (results["time_step"] == step)]
+        best = subset.loc[subset["validation_rmse_dollars"].idxmin()]
+        selections[(stock, step)] = best["configuration"]
+    return selections
+
+
+# ---------------------------------------------------------------------------
 # 14. Selected Configuration Lookup
 # ---------------------------------------------------------------------------
 
@@ -1468,7 +1719,7 @@ def get_lstm_configuration(
     Parameters
     ----------
     configuration_name : str
-        Configuration name stored in SELECTED_LSTM_CONFIGURATIONS.
+        Configuration name saved by corrected parameter tuning.
 
     Returns
     -------
@@ -1589,6 +1840,21 @@ def recursive_stock_forecast(
 
 
 # ---------------------------------------------------------------------------
+# 15a. Save Per-Epoch LSTM Evidence
+# ---------------------------------------------------------------------------
+
+def save_lstm_history_csv(history, stock_code, time_step, stage):
+    """Export Keras epoch losses/metrics to make graphs reproducible."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    table = pd.DataFrame(history.history)
+    table.insert(0, "epoch", range(1, len(table) + 1))
+    path = OUTPUT_DIR / f"lstm_{stock_code}_t{time_step}_{stage}_history.csv"
+    table.to_csv(path, index=False)
+    print(f"LSTM {stage} history saved to: {path}")
+    return path
+
+
+# ---------------------------------------------------------------------------
 # 16. Final LSTM Visualisations
 # ---------------------------------------------------------------------------
 
@@ -1652,7 +1918,7 @@ def save_lstm_loss_plot(
     )
 
     plt.ylabel(
-        "Mean Squared Error"
+        "Mean Squared Error (scaled closing prices)"
     )
 
     plt.legend()
@@ -1869,14 +2135,8 @@ def run_final_lstm_forecast(
         Final model settings and 50-day forecast results.
     """
 
-    configuration_name = (
-        SELECTED_LSTM_CONFIGURATIONS[
-            (
-                stock_code,
-                time_step,
-            )
-        ]
-    )
+    selected = select_corrected_lstm_configurations()
+    configuration_name = selected[(stock_code, time_step)]
 
     configuration = get_lstm_configuration(
         configuration_name
@@ -1912,15 +2172,14 @@ def run_final_lstm_forecast(
         "y_train"
     ]
 
-    (
-        X_train,
-        X_validation,
-        y_train,
-        y_validation,
-    ) = split_lstm_sequences(
-        X_all,
-        y_all,
-    )
+    # Internal validation metrics must use a scaler fitted only to
+    # the earlier tuning-training period; final training still uses all
+    # 204 historical observations and its own fresh scaler.
+    tuning_data = prepare_tuning_lstm_data(training_data, time_step)
+    X_train = tuning_data["X_train"]
+    X_validation = tuning_data["X_validation"]
+    y_train = tuning_data["y_train"]
+    y_validation = tuning_data["y_validation"]
 
     print("\n" + "=" * 70)
 
@@ -2002,6 +2261,7 @@ def run_final_lstm_forecast(
         verbose=0,
     )
 
+    save_lstm_history_csv(validation_history, stock_code, time_step, "validation")
     save_lstm_loss_plot(
         validation_history,
         stock_code,
@@ -2039,7 +2299,7 @@ def run_final_lstm_forecast(
 
     training_start = perf_counter()
 
-    final_model.fit(
+    final_history = final_model.fit(
         X_all,
         y_all,
         epochs=configuration[
@@ -2056,6 +2316,7 @@ def run_final_lstm_forecast(
         perf_counter()
         - training_start
     )
+    save_lstm_history_csv(final_history, stock_code, time_step, "full_train")
 
     # ---------------------------------------------------------------
     # Stage 3: recursive forecasting
@@ -2091,6 +2352,13 @@ def run_final_lstm_forecast(
         predicted_prices,
     )
 
+    # A last-observed-price naive baseline offers a useful reference.
+    # It uses no held-out data for forecasting; evaluation is retrospective.
+    last_known_close = float(training_data[CLOSE_COLUMN].iloc[-1])
+    naive_predictions = np.repeat(last_known_close, len(actual_prices))
+    naive_rmse = calculate_rmse(actual_prices, naive_predictions)
+    print(f"Last-price baseline forecast RMSE: ${naive_rmse:.4f}")
+
     print(
         f"Final 50-day forecast RMSE: "
         f"${forecast_rmse:.4f}"
@@ -2124,6 +2392,7 @@ def run_final_lstm_forecast(
                 predicted_prices,
                 4,
             ),
+            "naive_last_price": np.round(naive_predictions, 4),
             "absolute_error": np.round(
                 absolute_errors,
                 4,
@@ -2211,6 +2480,8 @@ def run_final_lstm_forecast(
             forecast_rmse,
             4,
         ),
+        "baseline_rmse_dollars": round(naive_rmse, 4),
+        "scaler_fit_scope": "full_204_day_history_final_model",
         "mean_absolute_error_dollars": round(
             float(
                 np.mean(
@@ -2242,6 +2513,7 @@ def run_all_final_lstm_forecasts(
         Final comparison results.
     """
 
+    select_corrected_lstm_configurations(stock_datasets)
     final_results = []
 
     total_runs = (
@@ -2621,6 +2893,9 @@ def run_forecasts_for_time_step(
         Final results for the three stock forecasts.
     """
 
+    # If corrected 36-run experiments do not exist, perform them first.
+    # This avoids silently selecting models from the prior leaky results.
+    select_corrected_lstm_configurations(stock_datasets)
     results = []
 
     print(
@@ -2790,4 +3065,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 2 and sys.argv[1] == "--tune":
+        datasets = load_assigned_stocks()
+        results = run_lstm_parameter_experiments(datasets)
+        display_best_lstm_configurations(results)
+    else:
+        main()

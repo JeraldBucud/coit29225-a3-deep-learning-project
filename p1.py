@@ -38,8 +38,14 @@ The UTKFace dataset is stored outside the Git repository and is expected
 to be located in the user's Desktop/UTKFace directory.
 """
 
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from random import Random
+import sys
+import argparse
+import json
+from importlib.metadata import PackageNotFoundError, version as package_version
 from time import perf_counter
 
 import matplotlib.pyplot as plt
@@ -57,8 +63,10 @@ from sklearn.model_selection import train_test_split
 # Keep the large UTKFace dataset outside the Git repository.
 DATASET_PATH = Path.home() / "Desktop" / "UTKFace"
 
-# Directory used for generated figures, models, and experiment outputs.
-OUTPUT_DIR = Path("outputs")
+# Keep all generated files beside this script, regardless of terminal location.
+PROJECT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = PROJECT_DIR / "outputs" / "p1"
+TUNING_OUTPUT_DIR = OUTPUT_DIR / "tuning"
 
 # All images are resized to a consistent shape before entering the CNN.
 IMAGE_SIZE = (128, 128)
@@ -1202,6 +1210,93 @@ def evaluate_cnn_model(
 
 
 # ---------------------------------------------------------------------------
+# 14a. Prediction Grid Rendering and Refresh (no model training required)
+# ---------------------------------------------------------------------------
+
+def save_cnn_prediction_grid(images, predictions, figure_path, show_plot=False):
+    """Render readable 5-column prediction grids from images and saved labels.
+
+    Each prediction gets its own title above the image, with deliberate
+    spacing between rows so second-row labels cannot overlap row-one photos.
+    """
+    sample_count = len(predictions)
+    if sample_count == 0 or sample_count != len(images):
+        raise ValueError("Prediction rows and images must have the same nonzero length")
+
+    columns = 5
+    rows = (sample_count + columns - 1) // columns
+    figure, axes = plt.subplots(
+        rows, columns,
+        figsize=(16, 4.1 * rows),
+        squeeze=False,
+    )
+    flat_axes = axes.ravel()
+
+    for index, (_, record) in enumerate(predictions.iterrows()):
+        ax = flat_axes[index]
+        ax.imshow(images[index])
+        title = (
+            f"Age: {int(record['actual_age'])} → "
+            f"{float(record['predicted_age']):.1f}\n"
+            f"{record['actual_gender_label']} → "
+            f"{record['predicted_gender_label']}"
+        )
+        ax.set_title(title, fontsize=10, pad=12, linespacing=1.35)
+        ax.axis("off")
+
+    for ax in flat_axes[sample_count:]:
+        ax.axis("off")
+
+    figure.suptitle("CNN Age and Gender Predictions", fontsize=16, y=0.98)
+    figure.subplots_adjust(
+        left=0.025, right=0.975,
+        top=0.85 if rows == 1 else 0.89,
+        bottom=0.05, wspace=0.07, hspace=0.32,
+    )
+    figure_path = Path(figure_path)
+    figure_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(figure_path, dpi=300, bbox_inches="tight")
+    if show_plot:
+        plt.show()
+    plt.close(figure)
+    return figure_path
+
+
+def refresh_saved_cnn_prediction_figures():
+    """Redraw original/augmented figures from existing CSVs, without retraining.
+
+    Existing prediction values and saved trained models are not modified.
+    UTKFace images must still be present in DATASET_PATH for this operation.
+    """
+    if not DATASET_PATH.is_dir():
+        raise FileNotFoundError(f"Dataset folder not found: {DATASET_PATH}")
+
+    for scenario in ("original", "augmented"):
+        csv_path = OUTPUT_DIR / f"cnn_{scenario}_sample_predictions.csv"
+        if not csv_path.is_file():
+            print(f"Skipping {scenario}: results not found at {csv_path}")
+            continue
+        results = pd.read_csv(csv_path)
+        images = []
+        for filename in results["filename"]:
+            # Read only UTKFace basenames from the saved CSV.
+            if Path(filename).name != filename:
+                raise ValueError(f"Unsafe image filename: {filename}")
+            image_path = DATASET_PATH / filename
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Missing image: {image_path}")
+            images.append(plt.imread(image_path))
+
+        path = save_cnn_prediction_grid(
+            images,
+            results,
+            OUTPUT_DIR / f"cnn_{scenario}_sample_predictions.png",
+            show_plot=False,
+        )
+        print(f"Refreshed {scenario} prediction figure: {path}")
+
+
+# ---------------------------------------------------------------------------
 # 14. CNN Sample Predictions
 # ---------------------------------------------------------------------------
 
@@ -1379,82 +1474,12 @@ def generate_cnn_sample_predictions(
         index=False,
     )
 
-    columns = 5
-
-    rows = (
-        num_samples
-        + columns
-        - 1
-    ) // columns
-
-    figure, axes = plt.subplots(
-        rows,
-        columns,
-        figsize=(15, 7),
-    )
-
-    # plt.subplots returns an ndarray for the normal ten-image case.
-    # Converting to a flat array keeps indexing straightforward.
-    axes = axes.flatten()
-
-    for index in range(num_samples):
-        actual_gender = int(
-            actual_genders[index]
-        )
-
-        predicted_gender = int(
-            predicted_genders[index]
-        )
-
-        axes[index].imshow(
-            images[index].numpy()
-        )
-
-        title = (
-            f"Age: {actual_ages[index]} "
-            f"→ {predicted_ages[index]:.1f}\n"
-            f"{GENDER_LABELS[actual_gender]} "
-            f"→ "
-            f"{GENDER_LABELS[predicted_gender]}"
-        )
-
-        axes[index].set_title(
-            title,
-            fontsize=10,
-        )
-
-        axes[index].axis(
-            "off"
-        )
-
-    for index in range(
-        num_samples,
-        len(axes),
-    ):
-        axes[index].axis(
-            "off"
-        )
-
-    figure.suptitle(
-        "CNN Age and Gender Predictions",
-        fontsize=14,
-    )
-
-    figure.tight_layout(
-        rect=(0, 0, 1, 0.95),
-        h_pad=1.5,
-        w_pad=1.0,
-    )
-
-    figure_path = (
-        OUTPUT_DIR
-        / f"{output_prefix}_sample_predictions.png"
-    )
-
-    figure.savefig(
-        figure_path,
-        dpi=300,
-        bbox_inches="tight",
+    figure_path = OUTPUT_DIR / f"{output_prefix}_sample_predictions.png"
+    save_cnn_prediction_grid(
+        images=[images[i].numpy() for i in range(num_samples)],
+        predictions=results_table,
+        figure_path=figure_path,
+        show_plot=show_plot,
     )
 
     print("\nCNN Sample Predictions")
@@ -1485,12 +1510,6 @@ def generate_cnn_sample_predictions(
         f"{csv_path}"
     )
 
-    if show_plot:
-        plt.show()
-
-    plt.close(
-        figure
-    )
 
     return results_table
 
@@ -1503,11 +1522,13 @@ def run_cnn_experiments(
     train_records,
     validation_records,
     configurations,
+    save_models=False,
 ):
     """
     Train and evaluate multiple CNN parameter configurations.
 
     Every configuration uses the same validated training/validation split.
+    Per-epoch histories are saved so printed values can be verified later.
     After training, the model is explicitly evaluated and ten reproducible
     sample predictions are generated, as required by the specification.
 
@@ -1529,6 +1550,45 @@ def run_cnn_experiments(
     """
 
     results = []
+
+    # Keep tuning outputs separate from final original/augmented results.
+    TUNING_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    packages = (
+        "tensorflow", "keras", "numpy", "pandas", "scikit-learn",
+        "matplotlib", "visualkeras", "pillow",
+    )
+    package_versions = {}
+    for package in packages:
+        try:
+            package_versions[package] = package_version(package)
+        except PackageNotFoundError:
+            package_versions[package] = "not installed"
+    manifest_path = TUNING_OUTPUT_DIR / "cnn_tuning_manifest.json"
+    manifest = {
+        "status": "running",
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_sha256": current_source_fingerprint(),
+        "data_split_sha256": dataset_split_fingerprint(
+            train_records, validation_records
+        ),
+        "training_images": len(train_records),
+        "validation_images": len(validation_records),
+        "random_seed": RANDOM_SEED,
+        "image_size": list(IMAGE_SIZE),
+        "validation_fraction": VALIDATION_SPLIT,
+        "augmentation_enabled": False,
+        "tuning_epochs": EXPERIMENT_EPOCHS,
+        "tensorflow_version": tf.__version__,
+        "python_version": sys.version.split()[0],
+        "pandas_version": pd.__version__,
+        "package_versions": package_versions,
+        "configurations": configurations,
+        "completed_configurations": [],
+        "save_models": bool(save_models),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
 
     print("\nCNN Parameter Experiments")
     print("=========================")
@@ -1636,6 +1696,19 @@ def run_cnn_experiments(
             - start_time
         )
 
+        # Preserve the actual Keras history for this configuration.
+        # These are observations, not recomputed or smoothed curves.
+        TUNING_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        experiment_history = pd.DataFrame(history.history)
+        experiment_history.insert(
+            0, "epoch", range(1, len(experiment_history) + 1)
+        )
+        experiment_history_path = (
+            TUNING_OUTPUT_DIR
+            / f"cnn_experiment_{configuration['name']}_history.csv"
+        )
+        experiment_history.to_csv(experiment_history_path, index=False)
+
         training_metrics, validation_metrics = evaluate_cnn_model(
             model,
             train_records,
@@ -1646,8 +1719,16 @@ def run_cnn_experiments(
         )
 
         output_prefix = (
-            f"cnn_experiment_"
+            f"tuning/cnn_experiment_"
             f"{configuration['name']}"
+        )
+
+        # Separate four-metric figure for each configuration.
+        generate_single_run_training_plots(
+            history.history,
+            scenario=f"experiment_{configuration['name']}",
+            show_plot=False,
+            output_dir=TUNING_OUTPUT_DIR,
         )
 
         generate_cnn_sample_predictions(
@@ -1695,6 +1776,11 @@ def run_cnn_experiments(
                 ),
                 4,
             ),
+            "best_age_epoch": (
+                history.history["val_age_mae"].index(
+                    min(history.history["val_age_mae"])
+                ) + 1
+            ),
             "final_val_gender_accuracy": round(
                 history.history[
                     "val_gender_accuracy"
@@ -1709,6 +1795,12 @@ def run_cnn_experiments(
                 ),
                 4,
             ),
+            "best_gender_epoch": (
+                history.history["val_gender_accuracy"].index(
+                    max(history.history["val_gender_accuracy"])
+                ) + 1
+            ),
+            "saved_checkpoint": "final_epoch",
             "final_val_age_loss": round(
                 history.history[
                     "val_age_loss"
@@ -1753,8 +1845,28 @@ def run_cnn_experiments(
             ),
         }
 
-        results.append(
-            result
+        result["source_sha256"] = manifest["source_sha256"]
+        result["data_split_sha256"] = manifest["data_split_sha256"]
+        result["random_seed"] = RANDOM_SEED
+        result["tensorflow_version"] = tf.__version__
+        result["saved_checkpoint"] = "final_epoch"
+
+        if save_models:
+            model_path = TUNING_OUTPUT_DIR / (
+                f"cnn_experiment_{configuration['name']}.keras"
+            )
+            model.save(model_path)
+            print(f"Saved experiment model: {model_path}")
+
+        results.append(result)
+        # Checkpoint the summary after every successful configuration.
+        pd.DataFrame(results).to_csv(
+            TUNING_OUTPUT_DIR / "cnn_experiment_results.csv",
+            index=False,
+        )
+        manifest["completed_configurations"].append(configuration["name"])
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
         )
 
         print(
@@ -1787,7 +1899,7 @@ def run_cnn_experiments(
     )
 
     output_path = (
-        OUTPUT_DIR
+        TUNING_OUTPUT_DIR
         / "cnn_experiment_results.csv"
     )
 
@@ -1805,6 +1917,12 @@ def run_cnn_experiments(
         )
     )
 
+    manifest["status"] = "completed"
+    manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    print(f"\nTuning manifest saved to: {manifest_path}")
     print(
         f"\nResults saved to: "
         f"{output_path}"
@@ -1821,6 +1939,7 @@ def generate_single_run_training_plots(
     history,
     scenario,
     show_plot=True,
+    output_dir=None,
 ):
     """
     Generate the four required training/validation curves for one CNN run.
@@ -1983,15 +2102,9 @@ def generate_single_run_training_plots(
         rect=(0, 0, 1, 0.96)
     )
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    output_path = (
-        OUTPUT_DIR
-        / f"cnn_{scenario}_training_curves.png"
-    )
+    target_dir = Path(output_dir) if output_dir is not None else OUTPUT_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_path = target_dir / f"cnn_{scenario}_training_curves.png"
 
     figure.savefig(
         output_path,
@@ -2197,6 +2310,10 @@ def generate_cnn_architecture_visualisation(
         f"{output_path}"
     )
 
+    # The generated VisualKeras graph is retained as evidence.
+    # A second, clearly labelled figure explains layers and both outputs.
+    generate_labelled_cnn_diagram(model, output_prefix)
+
     if show_plot:
         figure = plt.figure(
             figsize=(10, 8)
@@ -2223,6 +2340,193 @@ def generate_cnn_architecture_visualisation(
         )
 
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# 18a. Labelled Architecture Diagram
+# ---------------------------------------------------------------------------
+
+def generate_labelled_cnn_diagram(model, output_prefix):
+    """Create a readable schematic matching the actual model's CNN blocks.
+
+    This supplements the VisualKeras graph rather than replacing it.
+    The filter counts and dense-unit count are read from the model.
+    """
+    convolution_layers = [
+        layer for layer in model.layers
+        if isinstance(layer, tf.keras.layers.Conv2D)
+    ]
+    gender_dense = model.get_layer("gender_dense")
+    age_dense = model.get_layer("age_dense")
+    gender_dropout = model.get_layer("gender_dropout")
+    age_dropout = model.get_layer("age_dropout")
+
+    is_augmented = any(
+        layer.name == "data_augmentation" for layer in model.layers
+    )
+
+    figure, axis = plt.subplots(figsize=(17, 8.5))
+    axis.set_xlim(0, 1)
+    axis.set_ylim(0, 1)
+    axis.axis("off")
+
+    def node(x, y, text, colour):
+        axis.text(
+            x, y, text, ha="center", va="center", fontsize=10,
+            linespacing=1.4,
+            bbox={"boxstyle": "round,pad=0.8", "fc": colour,
+                  "ec": "#4b5563", "lw": 1.2},
+        )
+
+    def arrow(x1, y1, x2, y2):
+        axis.annotate(
+            "", xy=(x2, y2), xytext=(x1, y1),
+            arrowprops={"arrowstyle": "->", "lw": 1.7,
+                        "color": "#4b5563"},
+        )
+
+    # Shared processing path: input -> convolution/pooling blocks -> Flatten.
+    stages = [("Input\n128 x 128 x 3\nRGB (0-1)", "#dbeafe")]
+    for layer in convolution_layers:
+        stages.append((
+            f"Conv2D: {layer.filters} filters\n"
+            f"{layer.kernel_size[0]} x {layer.kernel_size[1]}, ReLU\n"
+            "MaxPool: 2 x 2", "#fef3c7"
+        ))
+    stages.append(("Flatten\nshared features", "#e9d5ff"))
+
+    left, right = 0.07, 0.65
+    xs = [left + (right-left)*i/(len(stages)-1)
+          for i in range(len(stages))]
+    for i, (label, colour) in enumerate(stages):
+        node(xs[i], 0.53, label, colour)
+        if i:
+            arrow(xs[i-1]+0.055, 0.53, xs[i]-0.055, 0.53)
+
+    branch_x = 0.79
+    output_x = 0.93
+    arrow(xs[-1]+0.045, 0.56, branch_x-0.055, 0.77)
+    arrow(xs[-1]+0.045, 0.50, branch_x-0.055, 0.29)
+
+    node(
+        branch_x, 0.77,
+        f"Age head\nDense {age_dense.units}, ReLU\n"
+        f"Dropout {age_dropout.rate:.2f}", "#dcfce7"
+    )
+    node(output_x, 0.77, "Dense 1, linear\nAge (years)\nLoss: MSE | Metric: MAE",
+         "#bbf7d0")
+    arrow(branch_x+0.060, 0.77, output_x-0.064, 0.77)
+
+    node(
+        branch_x, 0.29,
+        f"Gender head\nDense {gender_dense.units}, ReLU\n"
+        f"Dropout {gender_dropout.rate:.2f}", "#fce7f3"
+    )
+    node(output_x, 0.29,
+         "Dense 1, sigmoid\nGender (0/1)\nLoss: BCE | Metric: Accuracy",
+         "#fbcfe8")
+    arrow(branch_x+0.060, 0.29, output_x-0.064, 0.29)
+
+    axis.text(
+        0.5, 0.95, "CNN Architecture: Shared Backbone and Two Output Heads",
+        ha="center", fontsize=18, weight="bold"
+    )
+    if is_augmented:
+        note = "Augmented run: random flip, rotation, zoom and contrast before CNN"
+    else:
+        note = "Original-data run: no augmentation layers"
+    axis.text(0.5, 0.89, note, ha="center", fontsize=11)
+    axis.text(
+        0.5, 0.07,
+        f"Trainable parameters: {model.count_params():,} | "
+        "Adam optimiser | two task-specific outputs",
+        ha="center", fontsize=11
+    )
+
+    figure.tight_layout()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / f"{output_prefix}_architecture_labelled.png"
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+    print(f"Labelled architecture saved to: {output_path}")
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# 18b. Run Provenance and Compatible Final-Run Comparison
+# ---------------------------------------------------------------------------
+
+def dataset_split_fingerprint(train_records, validation_records):
+    """Fingerprint the exact train/validation membership and order."""
+    digest = sha256()
+    for subset, records in (
+        ("train", train_records),
+        ("validation", validation_records),
+    ):
+        for record in records:
+            line = (
+                f"{subset}|{record['image_path'].name}|"
+                f"{record['age']}|{record['gender']}\n"
+            )
+            digest.update(line.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def current_source_fingerprint():
+    """Record which version of p1.py generated the reported results."""
+    return sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def save_final_run_evidence(result):
+    """Save one scenario independently, then compare compatible runs.
+
+    The required menu trains original and augmented scenarios separately.
+    A comparison is only refreshed when both results were produced by the
+    same code, dataset split, and hyperparameter configuration; otherwise
+    combining results could mix experiments from different code versions.
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    scenario = result["scenario"]
+    single_result_path = OUTPUT_DIR / f"cnn_{scenario}_run_summary.csv"
+    pd.DataFrame([result]).to_csv(single_result_path, index=False)
+    print(f"Run summary saved to: {single_result_path}")
+
+    original_path = OUTPUT_DIR / "cnn_original_run_summary.csv"
+    augmented_path = OUTPUT_DIR / "cnn_augmented_run_summary.csv"
+    if not original_path.is_file() or not augmented_path.is_file():
+        print("Comparison pending: run the other menu option first.")
+        return
+
+    original = pd.read_csv(original_path).iloc[0].to_dict()
+    augmented = pd.read_csv(augmented_path).iloc[0].to_dict()
+    signature_keys = (
+        "source_sha256", "data_split_sha256", "configuration",
+        "filters", "dense_units", "dropout_rate", "learning_rate",
+        "batch_size", "epochs",
+    )
+    if any(str(original[key]) != str(augmented[key])
+           for key in signature_keys):
+        print(
+            "Comparison not refreshed: results come from different "
+            "source code, data split, or model settings."
+        )
+        return
+
+    comparison_path = OUTPUT_DIR / "cnn_final_comparison.csv"
+    pd.DataFrame([original, augmented]).to_csv(
+        comparison_path, index=False
+    )
+    print(f"Compatible final comparison saved to: {comparison_path}")
+
+    histories = {}
+    for name in ("original", "augmented"):
+        history_path = OUTPUT_DIR / f"cnn_{name}_history.csv"
+        if not history_path.is_file():
+            print(f"Missing training history: {history_path}")
+            return
+        histories[name] = pd.read_csv(history_path).to_dict(orient="list")
+
+    generate_final_training_plots(histories)
 
 
 # ---------------------------------------------------------------------------
@@ -2445,6 +2749,13 @@ def train_final_cnn(
             "batch_size"
         ],
         "epochs": FINAL_TRAINING_EPOCHS,
+        "saved_checkpoint": "final_epoch",
+        "saved_epoch": FINAL_TRAINING_EPOCHS,
+        "run_utc": datetime.now(timezone.utc).isoformat(),
+        "source_sha256": current_source_fingerprint(),
+        "data_split_sha256": dataset_split_fingerprint(
+            train_records, validation_records
+        ),
         "parameters": model.count_params(),
         "training_seconds": round(
             training_time,
@@ -2542,6 +2853,16 @@ def train_final_cnn(
     )
 
     print(
+        f"Final saved checkpoint (epoch {FINAL_TRAINING_EPOCHS}): "
+        f"age MAE {result['evaluated_validation_age_mae']:.4f}, "
+        f"gender accuracy {result['evaluated_validation_gender_accuracy']:.2%}"
+    )
+    print(
+        "Note: best age and gender metrics above may come from different "
+        "earlier epochs; they are not the metrics of one best checkpoint."
+    )
+
+    print(
         f"Training time: "
         f"{training_time:.2f} seconds"
     )
@@ -2579,6 +2900,10 @@ def train_final_cnn(
         num_samples=10,
         show_plot=True,
     )
+
+    # Menu options 1 and 2 can now produce a correctly matched comparison
+    # automatically, without requiring another full training session.
+    save_final_run_evidence(result)
 
     return history.history, result
 
@@ -2778,9 +3103,9 @@ def run_menu(
 # 22. Main Program
 # ---------------------------------------------------------------------------
 
-def main():
+def main(tune=False, save_tuning_models=False):
     """
-    Load UTKFace metadata and launch the required CNN application menu.
+    Load UTKFace and run either tuning or the required assessment menu.
     """
 
     if not DATASET_PATH.exists():
@@ -2830,11 +3155,43 @@ def main():
         f"{len(validation_records):,}"
     )
 
-    run_menu(
-        train_records,
-        validation_records,
-    )
+    if tune:
+        display_cnn_configurations()
+        run_cnn_experiments(
+            train_records,
+            validation_records,
+            CNN_CONFIGURATIONS,
+            save_models=save_tuning_models,
+        )
+    else:
+        run_menu(
+            train_records,
+            validation_records,
+        )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="COIT29225 Assessment 3 CNN age/gender application"
+    )
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument(
+        "--tune", action="store_true",
+        help="Run all four parameter configurations and save evidence under outputs/p1/tuning/",
+    )
+    commands.add_argument(
+        "--refresh-prediction-plots", action="store_true",
+        help="Regenerate final prediction figures from saved results without retraining",
+    )
+    parser.add_argument(
+        "--save-tuning-models", action="store_true",
+        help="Also save all four large .keras tuning models (requires --tune)",
+    )
+    args = parser.parse_args()
+    if args.save_tuning_models and not args.tune:
+        parser.error("--save-tuning-models requires --tune")
+
+    if args.refresh_prediction_plots:
+        refresh_saved_cnn_prediction_figures()
+    else:
+        main(tune=args.tune, save_tuning_models=args.save_tuning_models)
