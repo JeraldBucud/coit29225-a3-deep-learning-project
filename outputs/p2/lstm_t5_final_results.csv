@@ -1,0 +1,4 @@
+stock,stock_name,time_step,configuration,lstm_units,epochs,batch_size,learning_rate,parameters,historical_sequences,forecast_days,forecast_rmse_dollars,baseline_rmse_dollars,scaler_fit_scope,mean_absolute_error_dollars,training_seconds
+RIO,Rio Tinto Group,5,C_32_units_20_epochs,32,20,16,0.001,4385,199,50,7.3463,9.4981,full_204_day_history_final_model,6.3489,2.96
+BHP,BHP Group,5,B_16_units_50_epochs,16,50,16,0.001,1169,199,50,3.3441,5.4177,full_204_day_history_final_model,2.6051,4.64
+FMG,Fortescue Ltd.,5,F_64_units_50_epochs,64,50,16,0.001,16961,199,50,1.9133,0.832,full_204_day_history_final_model,1.6243,3.08
