@@ -1,3 +1,4 @@
+
 # Python
 __pycache__/
 *.py[cod]
@@ -37,9 +38,28 @@ data/*
 logs/
 tensorboard/
 
-# Generated outputs
-outputs/*
+# Generated outputs: ignore by default
+outputs/**
+!outputs/
 !outputs/.gitkeep
+!outputs/p1/
+!outputs/p2/
+
+# CNN: publish selected visual evidence
+!outputs/p1/cnn_original_architecture_labelled.png
+!outputs/p1/cnn_augmented_architecture_labelled.png
+!outputs/p1/cnn_age_mae_comparison.png
+!outputs/p1/cnn_gender_accuracy_comparison.png
+!outputs/p1/cnn_original_training_curves.png
+!outputs/p1/cnn_augmented_training_curves.png
+!outputs/p1/cnn_original_sample_predictions.png
+!outputs/p1/cnn_augmented_sample_predictions.png
+!outputs/p1/cnn_final_comparison.csv
+
+# LSTM: publish forecast visualisations and final results
+!outputs/p2/*_forecast.png
+!outputs/p2/lstm_t5_final_results.csv
+!outputs/p2/lstm_t10_final_results.csv
 
 # Temporary files
 *.tmp
